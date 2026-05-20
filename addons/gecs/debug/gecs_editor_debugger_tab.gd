@@ -50,6 +50,7 @@ const ICON_PIN = "📌"  # Pinned item icon
 
 
 func _ready() -> void:
+	_match_theme_to_editor_luminance()
 	_update_debug_mode_overlay()
 	if system_tree:
 		# Eight columns: name, group, current time, min, max, avg, status, order
@@ -199,6 +200,19 @@ func _process(delta: float) -> void:
 		return
 	_poll_elapsed = 0.0
 	_poll_expanded_entities()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_THEME_CHANGED:
+		_match_theme_to_editor_luminance()
+
+
+func _match_theme_to_editor_luminance() -> void:
+	var editor_base_color: Color = get_theme_color("base_color", "Editor")
+	if editor_base_color.get_luminance() < 0.5:
+		theme = null # No theme defaults to a dark style
+	else:
+		theme = load("uid://c1k1244qg6usg") # Load: gecs_editor_debugger_tab_light_theme.tres
 
 
 func _update_debug_mode_overlay() -> void:
