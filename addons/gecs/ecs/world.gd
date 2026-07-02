@@ -65,6 +65,10 @@ var _obs_entries_by_custom_event: Dictionary = {}
 ## All observer/sub-observer entries belonging to a given [Observer], keyed by observer instance.
 ## Used for O(1) cleanup on [method remove_observer].
 var _obs_entries_by_observer: Dictionary = {}
+## Prebuilt deduped list of monitor entries (is_monitor == true), maintained
+## copy-on-write at (un)registration so _evaluate_monitors_for_entity allocates
+## nothing per event. Empty when no monitors are registered — the common case.
+var _monitor_entries: Array = []
 ## All the [System]s by group Dictionary[String, Array[System]]
 var systems_by_group: Dictionary[String, Array] = {}
 ## All the [System]s in the world flattened into a single array
@@ -848,8 +852,12 @@ func _on_entity_component_added(entity: Entity, component: Resource) -> void:
 	# Emit Signal
 	component_added.emit(entity, component)
 	_handle_observer_component_added(entity, component)
-	if component != null and component.get_script() != null:
-		_evaluate_monitors_for_entity(entity, [component.get_script().resource_path])
+	if (
+		not _monitor_entries.is_empty()
+		and component != null
+		and component.get_script() != null
+	):
+		_evaluate_monitors_for_entity(entity, component.get_script().resource_path)
 	# (Property changes arrive via the entity's direct _world call — no signal hop.)
 	if ECS.debug:
 		assert(GECSEditorDebuggerMessages.entity_component_added(entity, component), "")
@@ -875,8 +883,12 @@ func _on_entity_component_property_change(
 	# component. Monitor sensitivity is keyed by component script path; property-query
 	# components live in the same path so this catches "hp dropped below threshold"-style
 	# transitions without any structural mutation.
-	if component != null and component.get_script() != null:
-		_evaluate_monitors_for_entity(entity, [component.get_script().resource_path])
+	if (
+		not _monitor_entries.is_empty()
+		and component != null
+		and component.get_script() != null
+	):
+		_evaluate_monitors_for_entity(entity, component.get_script().resource_path)
 	# ARCHETYPE: No cache invalidation - property changes don't affect archetype membership
 	# Send the message to the debugger if we're in debug
 	if ECS.debug:
@@ -918,8 +930,12 @@ func _on_entity_component_removed(entity, component: Resource) -> void:
 
 	component_removed.emit(entity, component)
 	_handle_observer_component_removed(entity, component)
-	if component != null and component.get_script() != null:
-		_evaluate_monitors_for_entity(entity, [component.get_script().resource_path])
+	if (
+		not _monitor_entries.is_empty()
+		and component != null
+		and component.get_script() != null
+	):
+		_evaluate_monitors_for_entity(entity, component.get_script().resource_path)
 	if ECS.debug:
 		assert(GECSEditorDebuggerMessages.entity_component_removed(entity, component), "")
 
@@ -943,9 +959,10 @@ func _on_entity_relationship_added(entity: Entity, relationship: Relationship) -
 
 	relationship_added.emit(entity, relationship)
 	_dispatch_observer_event(Observer.Event.RELATIONSHIP_ADDED, entity, relationship)
-	var rel_path_added = _get_relationship_relation_path(relationship)
-	if rel_path_added != "":
-		_evaluate_monitors_for_entity(entity, [rel_path_added])
+	if not _monitor_entries.is_empty():
+		var rel_path_added = _get_relationship_relation_path(relationship)
+		if rel_path_added != "":
+			_evaluate_monitors_for_entity(entity, rel_path_added)
 	if ECS.debug:
 		assert(GECSEditorDebuggerMessages.entity_relationship_added(entity, relationship), "")
 
@@ -955,9 +972,10 @@ func _on_entity_relationship_removed(entity: Entity, relationship: Relationship)
 	# Dispatch observer RELATIONSHIP_REMOVED BEFORE archetype move so the entity still
 	# structurally satisfies match() queries that reference the relationship type.
 	_dispatch_observer_event(Observer.Event.RELATIONSHIP_REMOVED, entity, relationship)
-	var rel_path_removed = _get_relationship_relation_path(relationship)
-	if rel_path_removed != "":
-		_evaluate_monitors_for_entity(entity, [rel_path_removed])
+	if not _monitor_entries.is_empty():
+		var rel_path_removed = _get_relationship_relation_path(relationship)
+		if rel_path_removed != "":
+			_evaluate_monitors_for_entity(entity, rel_path_removed)
 	# Skip archetype move when called from batch handler re-emitting per-entity signals
 	if not _in_batch_relationship_emit:
 		# STRUCTURAL: Move entity to archetype without the pair slot key
@@ -1065,6 +1083,11 @@ func _handle_observer_component_changed(
 	new_value: Variant,
 	old_value: Variant,
 ) -> void:
+	# Skip the payload Dictionary allocation entirely when nothing subscribes to
+	# CHANGED — this runs on EVERY emitting property write.
+	var entries: Array = _obs_entries_by_event.get(Observer.Event.CHANGED, [])
+	if entries.is_empty():
+		return
 	var payload: Dictionary = {
 		"component": component,
 		"property": property,
@@ -1206,7 +1229,11 @@ func _index_observer_entry(entry: Dictionary) -> void:
 	var q: QueryBuilder = entry.query
 	if q == null:
 		return
-	# Index by Observer.Event bit flags
+	# Index by Observer.Event bit flags.
+	# COPY-ON-WRITE: registration swaps in a fresh array instead of appending in
+	# place, so _dispatch_observer_event can iterate the current array without
+	# duplicating it per event — re-entrant add_observer inside a callback builds
+	# a new array and can't mutate the one being iterated.
 	for e in [
 		Observer.Event.ADDED,
 		Observer.Event.REMOVED,
@@ -1217,14 +1244,18 @@ func _index_observer_entry(entry: Dictionary) -> void:
 		Observer.Event.RELATIONSHIP_REMOVED,
 	]:
 		if q.has_event(e):
-			var arr: Array = _obs_entries_by_event.get(e, [])
+			var arr: Array = _obs_entries_by_event.get(e, []).duplicate()
 			arr.append(entry)
 			_obs_entries_by_event[e] = arr
-	# Index by custom event StringName
+	# Index by custom event StringName (same COW discipline)
 	for ev_name in q._observer_event_names:
-		var arr2: Array = _obs_entries_by_custom_event.get(ev_name, [])
+		var arr2: Array = _obs_entries_by_custom_event.get(ev_name, []).duplicate()
 		arr2.append(entry)
 		_obs_entries_by_custom_event[ev_name] = arr2
+	if entry.get("is_monitor", false):
+		var monitors: Array = _monitor_entries.duplicate()
+		monitors.append(entry)
+		_monitor_entries = monitors
 
 
 ## Remove all dispatch entries belonging to [param _observer] from the event indexes.
@@ -1247,6 +1278,11 @@ func _unregister_observer_entries(_observer: Observer) -> void:
 			if entry.observer != _observer:
 				kept2.append(entry)
 		_obs_entries_by_custom_event[ev_name] = kept2
+	var kept_monitors: Array = []
+	for entry in _monitor_entries:
+		if entry.observer != _observer:
+			kept_monitors.append(entry)
+	_monitor_entries = kept_monitors
 	_obs_entries_by_observer.erase(_observer)
 
 
@@ -1263,12 +1299,9 @@ func _dispatch_observer_event(event: Variant, entity: Entity, payload: Variant) 
 		entries = _obs_entries_by_event.get(event, [])
 	if entries.is_empty():
 		return
-	# Snapshot so re-entrant add_observer/remove_observer inside a callback cannot
-	# mutate the list we're iterating (new observers would otherwise receive the
-	# event that caused their creation).
-	entries = entries.duplicate()
-	# Snapshot deferred-mode observers at the end (so callback invocations happen
-	# below and deferred observers drain later).
+	# No snapshot needed: (un)registration swaps entry arrays copy-on-write, so a
+	# re-entrant add_observer/remove_observer inside a callback builds a NEW array
+	# and cannot mutate the one we're iterating.
 	# Component-lifecycle events (ADDED/REMOVED/CHANGED) are keyed by the specific
 	# component that triggered them — we can cheaply reject entries whose watched_paths
 	# don't include that component's script path BEFORE running any world query.
@@ -1626,19 +1659,12 @@ func _yield_existing_for_entry(entry: Dictionary) -> void:
 ## When an entity is removed from the world, evict it from all monitor membership sets
 ## and fire UNMATCH on monitors that had it.
 func _drop_entity_from_monitors(entity: Entity) -> void:
-	# Dedup: monitors with both MATCH and UNMATCH are indexed under both keys.
-	var seen: Dictionary = {}
-	var candidates: Array = []
-	for e_key in [Observer.Event.UNMATCH, Observer.Event.MATCH]:
-		for entry in _obs_entries_by_event.get(e_key, []):
-			if seen.has(entry):
-				continue
-			seen[entry] = true
-			candidates.append(entry)
-	# Iterate the snapshot — callbacks mutating observer registration stay safe.
-	for entry in candidates:
-		if not entry.get("is_monitor", false):
-			continue
+	if _monitor_entries.is_empty():
+		return
+	# _monitor_entries is maintained copy-on-write and already deduped —
+	# callbacks mutating observer registration swap in a new array, so
+	# iterating the current reference stays safe.
+	for entry in _monitor_entries:
 		if entry.membership.has(entity):
 			entry.membership.erase(entity)
 			var q: QueryBuilder = entry.query
@@ -1678,35 +1704,25 @@ func _seed_monitor_membership(entry: Dictionary, yield_existing: bool = false) -
 
 ## Re-evaluate monitor-mode observers whose sensitivity set intersects [param touched_paths].
 ## Fires MATCH / UNMATCH on membership delta for [param entity].
-func _evaluate_monitors_for_entity(entity: Entity, touched_paths: Array) -> void:
+## Evaluate monitor (on_match/on_unmatch) transitions for one entity after a
+## structural or property event touched [param touched_path] (a component
+## script resource_path; "" = evaluate regardless of sensitivity).
+## Zero-allocation: iterates the prebuilt COW _monitor_entries list and
+## early-outs when no monitors are registered — the common case.
+func _evaluate_monitors_for_entity(entity: Entity, touched_path: String = "") -> void:
+	if _monitor_entries.is_empty():
+		return
 	if entity == null or not is_instance_valid(entity):
 		return
-	# Walk monitor entries once; dedup by entry identity since MATCH + UNMATCH share entries.
-	var seen: Dictionary = {}
-	var candidates: Array = []
-	for e_key in [Observer.Event.MATCH, Observer.Event.UNMATCH]:
-		for entry in _obs_entries_by_event.get(e_key, []):
-			if seen.has(entry):
-				continue
-			seen[entry] = true
-			candidates.append(entry)
-	for entry in candidates:
-		if not entry.get("is_monitor", false):
-			continue
+	for entry in _monitor_entries:
 		var obs: Observer = entry.observer
 		if obs == null or not is_instance_valid(obs) or not obs.active or obs.paused:
 			continue
 		# Cheap rejection by sensitivity
-		if not touched_paths.is_empty():
+		if touched_path != "":
 			var sens: Array = entry.get("monitor_sensitivity", [])
-			if not sens.is_empty():
-				var touches := false
-				for p in touched_paths:
-					if sens.has(p):
-						touches = true
-						break
-				if not touches:
-					continue
+			if not sens.is_empty() and not sens.has(touched_path):
+				continue
 		var was_matching: bool = entry.membership.has(entity)
 		var now_matches: bool = _observer_entry_entity_matches(entry, entity)
 		if now_matches and not was_matching:
