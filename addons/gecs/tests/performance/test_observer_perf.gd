@@ -407,3 +407,69 @@ func test_observer_vs_system_sporadic_changes(
 		)
 	)
 	world.purge(false)
+
+
+## Floor measurement: property writes through emitting setters with ZERO
+## observers registered. Isolates the signal-hop + dispatch-path cost that
+## every emitting write pays even when nothing is listening.
+func test_zero_observer_property_writes(scale: int, test_parameters := [[100], [1000], [10000]]):
+	setup_observer_test_entities(scale)
+	var entities = world.query.with_all([C_ObserverTest]).execute()
+
+	var time_ms = PerfHelpers.time_it(
+		func():
+			for entity in entities:
+				var comp = entity.get_component(C_ObserverTest)
+				comp.value = comp.value + 1
+	)
+
+	PerfHelpers.record_result("zero_observer_property_writes", scale, time_ms)
+	world.purge(false)
+
+
+## Monitor observer on a property-threshold query. Flips 10% of entities
+## across the threshold per pass (MATCH then UNMATCH), measuring monitor
+## transition evaluation cost.
+class PerfMonitorObserver:
+	extends Observer
+	var match_count: int = 0
+	var unmatch_count: int = 0
+
+	func query() -> QueryBuilder:
+		return q.with_all([{C_ObserverHealth: {"health": {"_gt": 0}}}]).on_match().on_unmatch()
+
+	func each(event: Variant, _entity: Entity, _payload: Variant = null) -> void:
+		match event:
+			Observer.Event.MATCH:
+				match_count += 1
+			Observer.Event.UNMATCH:
+				unmatch_count += 1
+
+
+func test_monitor_transitions(scale: int, test_parameters := [[100], [1000], [10000]]):
+	for i in scale:
+		var entity = Entity.new()
+		entity.name = "MonitorEntity_%d" % i
+		entity.add_component(C_ObserverHealth.new(100, 100))
+		world.add_entity(entity, null, false)
+
+	var observer = PerfMonitorObserver.new()
+	world.add_observer(observer)
+
+	var entities = world.query.with_all([C_ObserverHealth]).execute()
+	var flip_count = maxi(scale / 10, 1)
+
+	var time_ms = PerfHelpers.time_it(
+		func():
+			for pass_i in range(10):
+				for i in range(flip_count):
+					var comp = entities[i].get_component(C_ObserverHealth)
+					comp.health = 0  # crosses threshold -> UNMATCH
+				for i in range(flip_count):
+					var comp = entities[i].get_component(C_ObserverHealth)
+					comp.health = 100  # crosses back -> MATCH
+	)
+
+	PerfHelpers.record_result("monitor_transitions", scale, time_ms)
+	prints("Monitor fired %d MATCH / %d UNMATCH" % [observer.match_count, observer.unmatch_count])
+	world.purge(false)

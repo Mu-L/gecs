@@ -106,3 +106,56 @@ func test_bulk_entity_operations(scale: int, test_parameters := [[100], [1000], 
 
 	PerfHelpers.record_result("bulk_entity_operations", scale, time_ms)
 	world.purge(false)
+
+
+## Bulk spawn where every entity shares one composition (single archetype).
+## This is the template-spawn case a true bulk-spawn path should collapse
+## into one signature calc + one archetype insert per batch.
+func test_bulk_spawn_grouped(scale: int, test_parameters := [[100], [1000], [10000]]):
+	var entities = []
+	for i in scale:
+		var entity = Entity.new()
+		entity.name = "GroupedEntity_%d" % i
+		entity.add_component(C_TestA.new())
+		entity.add_component(C_TestB.new())
+		entities.append(entity)
+
+	var time_ms = PerfHelpers.time_it(func(): world.add_entities(entities))
+
+	PerfHelpers.record_result("bulk_spawn_grouped", scale, time_ms)
+	world.purge(false)
+
+
+## Sustained spawn/despawn churn: repeatedly fill and empty the world with the
+## same composition. Cycle 2+ re-hits the same archetypes — if transition
+## edges/archetypes survive emptying, later cycles should cost the same or
+## less than the first.
+func test_spawn_despawn_churn(scale: int, test_parameters := [[100], [1000]]):
+	var cycle_times: Array[float] = []
+
+	for cycle in 3:
+		var entities = []
+		for i in scale:
+			var entity = Entity.new()
+			entity.name = "ChurnEntity_%d_%d" % [cycle, i]
+			entity.add_component(C_TestA.new())
+			entity.add_component(C_TestB.new())
+			entities.append(entity)
+
+		var time_ms = PerfHelpers.time_it(
+			func():
+				world.add_entities(entities)
+				for entity in entities:
+					world.remove_entity(entity)
+		)
+		cycle_times.append(time_ms)
+
+	PerfHelpers.record_result("spawn_despawn_churn_cycle1", scale, cycle_times[0])
+	PerfHelpers.record_result("spawn_despawn_churn_cycle3", scale, cycle_times[2])
+	prints(
+		(
+			"churn cycle3/cycle1 ratio: %.2f (<=1.0 means archetype/edge reuse works)"
+			% (cycle_times[2] / maxf(cycle_times[0], 0.001))
+		)
+	)
+	world.purge(false)
