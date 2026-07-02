@@ -227,34 +227,22 @@ func add_components(_components: Array):
 	if added_components.is_empty():
 		return
 
-	# OPTIMIZATION: Move to final archetype only once, after all components are added
-	if ECS.world and ECS.world.entity_to_archetype.has(self):
-		var old_archetype = ECS.world.entity_to_archetype[self]
-		var new_signature = ECS.world._calculate_entity_signature(self)
-		var comp_types = ECS.world._get_entity_archetype_keys(self)
-		var new_archetype = ECS.world._get_or_create_archetype(new_signature, comp_types)
-
-		# Only move if we actually need a different archetype
-		if old_archetype != new_archetype:
-			# Remove from old archetype
-			old_archetype.remove_entity(self)
-			# Add to new archetype
-			new_archetype.add_entity(self)
-			ECS.world.entity_to_archetype[self] = new_archetype
-
-			# Clean up empty old archetype
-			if old_archetype.is_empty():
-				ECS.world._delete_archetype(old_archetype)
-		else:
-			# Same archetype - just update the column data for new components
-			for component in added_components:
-				var comp_key = _comp_key(component)
-				var entity_index = old_archetype.entity_to_index[self]
-				old_archetype.columns[comp_key][entity_index] = component
+	# OPTIMIZATION: One archetype transition for the whole batch. The per-component
+	# component_added emits below make the world handler queue a deferred move
+	# (instead of recomputing the signature per component); closing the window
+	# commits a single transition. Nested inside an outer window (CommandBuffer
+	# flush), owns=false and the outer window commits instead.
+	var owns_deferral := false
+	if ECS.world:
+		owns_deferral = ECS.world._begin_deferred_moves()
+		ECS.world._refresh_entity_archetype(self)
 
 	# Emit signals for all added components
 	for component in added_components:
 		component_added.emit(self, component)
+
+	if owns_deferral:
+		ECS.world._end_deferred_moves()
 
 
 ## Removes a single component from the entity.[br]
@@ -333,28 +321,18 @@ func remove_components(_components: Array):
 	if removed_components.is_empty():
 		return
 
-	# OPTIMIZATION: Move to final archetype only once, after all components are removed
-	if ECS.world and ECS.world.entity_to_archetype.has(self):
-		var old_archetype = ECS.world.entity_to_archetype[self]
-		var new_signature = ECS.world._calculate_entity_signature(self)
-		var comp_types = ECS.world._get_entity_archetype_keys(self)
-		var new_archetype = ECS.world._get_or_create_archetype(new_signature, comp_types)
-
-		# Only move if we actually need a different archetype
-		if old_archetype != new_archetype:
-			# Remove from old archetype
-			old_archetype.remove_entity(self)
-			# Add to new archetype
-			new_archetype.add_entity(self)
-			ECS.world.entity_to_archetype[self] = new_archetype
-
-			# Clean up empty old archetype
-			if old_archetype.is_empty():
-				ECS.world._delete_archetype(old_archetype)
+	# OPTIMIZATION: One archetype transition for the whole batch (see add_components).
+	var owns_deferral := false
+	if ECS.world:
+		owns_deferral = ECS.world._begin_deferred_moves()
+		ECS.world._refresh_entity_archetype(self)
 
 	# Emit signals for all removed components
 	for component in removed_components:
 		component_removed.emit(self, component)
+
+	if owns_deferral:
+		ECS.world._end_deferred_moves()
 
 
 ##  Removes all components from the entity.[br]

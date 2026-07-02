@@ -131,6 +131,17 @@ var _pending_invalidation: bool = false
 ## Guard flag: true when a batch relationship handler is emitting per-entity signals.
 ## Prevents _on_entity_relationship_added/removed from doing redundant archetype moves.
 var _in_batch_relationship_emit: bool = false
+## Deferred archetype moves: while true, structural handlers queue touched entities
+## instead of moving them per operation. CommandBuffer.execute() opens this window so
+## a remove+add state transition costs ONE archetype move instead of two.
+var _defer_archetype_moves: bool = false
+## Entities with a pending deferred archetype move, in first-touch order.
+var _deferred_move_entities: Array = []
+var _deferred_move_set: Dictionary = {}  # Entity -> true
+## Count of systems currently mid-iteration with safe_iteration=false (zero-copy).
+## Structural mutation while this is > 0 (outside a deferred-move window) can skip
+## entities via swap-remove — flagged with a debug-mode error in structural handlers.
+var _iteration_depth: int = 0
 ## One-shot guard: fires push_error once when archetype count first exceeds 500 in debug mode
 var _archetype_explosion_warned: bool = false
 ## Frame + accumulated performance metrics (debug-only)
@@ -838,14 +849,20 @@ func _rebuild_group_timers() -> void:
 func _on_entity_component_added(entity: Entity, component: Resource) -> void:
 	# ARCHETYPE: Move entity to new archetype
 	if entity_to_archetype.has(entity):
-		var old_archetype = entity_to_archetype[entity]
-		var comp_key = component.get_script().get_instance_id()
-		var new_archetype = _move_entity_to_new_archetype_fast(
-			entity,
-			old_archetype,
-			comp_key,
-			true,
-		)
+		if _defer_archetype_moves:
+			# Inside a CommandBuffer flush — coalesce to one move per entity at window close.
+			_queue_deferred_move(entity)
+		else:
+			if ECS.debug and _iteration_depth > 0:
+				_warn_structural_change_during_iteration("add_component", entity)
+			var old_archetype = entity_to_archetype[entity]
+			var comp_key = component.get_script().get_instance_id()
+			var new_archetype = _move_entity_to_new_archetype_fast(
+				entity,
+				old_archetype,
+				comp_key,
+				true,
+			)
 		# Membership changed — bump so cached execute() results know they're stale.
 		# The query→archetype cache itself stays valid (maintained incrementally).
 		_bump_membership("entity_component_added")
@@ -906,14 +923,19 @@ func _on_entity_component_property_change(
 ## [param component] The resource path of the removed component.
 func _on_entity_component_removed(entity, component: Resource) -> void:
 	if entity_to_archetype.has(entity):
-		var old_archetype = entity_to_archetype[entity]
-		var comp_key = component.get_script().get_instance_id()
-		var new_archetype = _move_entity_to_new_archetype_fast(
-			entity,
-			old_archetype,
-			comp_key,
-			false,
-		)
+		if _defer_archetype_moves:
+			_queue_deferred_move(entity)
+		else:
+			if ECS.debug and _iteration_depth > 0:
+				_warn_structural_change_during_iteration("remove_component", entity)
+			var old_archetype = entity_to_archetype[entity]
+			var comp_key = component.get_script().get_instance_id()
+			var new_archetype = _move_entity_to_new_archetype_fast(
+				entity,
+				old_archetype,
+				comp_key,
+				false,
+			)
 		# Membership changed — bump so cached execute() results know they're stale.
 		_bump_membership("entity_component_removed")
 
@@ -931,10 +953,15 @@ func _on_entity_relationship_added(entity: Entity, relationship: Relationship) -
 	if not _in_batch_relationship_emit:
 		# STRUCTURAL: Move entity to new archetype including the pair slot key
 		if entity_to_archetype.has(entity):
-			var old_archetype = entity_to_archetype[entity]
-			var slot_key = _relationship_slot_key(relationship)
-			if slot_key != "":
-				_move_entity_to_new_archetype_fast(entity, old_archetype, slot_key, true)
+			if _defer_archetype_moves:
+				_queue_deferred_move(entity)
+			else:
+				if ECS.debug and _iteration_depth > 0:
+					_warn_structural_change_during_iteration("add_relationship", entity)
+				var old_archetype = entity_to_archetype[entity]
+				var slot_key = _relationship_slot_key(relationship)
+				if slot_key != "":
+					_move_entity_to_new_archetype_fast(entity, old_archetype, slot_key, true)
 			_bump_membership("entity_relationship_added")
 
 	relationship_added.emit(entity, relationship)
@@ -958,10 +985,15 @@ func _on_entity_relationship_removed(entity: Entity, relationship: Relationship)
 	if not _in_batch_relationship_emit:
 		# STRUCTURAL: Move entity to archetype without the pair slot key
 		if entity_to_archetype.has(entity):
-			var old_archetype = entity_to_archetype[entity]
-			var slot_key = _relationship_slot_key(relationship)
-			if slot_key != "":
-				_move_entity_to_new_archetype_fast(entity, old_archetype, slot_key, false)
+			if _defer_archetype_moves:
+				_queue_deferred_move(entity)
+			else:
+				if ECS.debug and _iteration_depth > 0:
+					_warn_structural_change_during_iteration("remove_relationship", entity)
+				var old_archetype = entity_to_archetype[entity]
+				var slot_key = _relationship_slot_key(relationship)
+				if slot_key != "":
+					_move_entity_to_new_archetype_fast(entity, old_archetype, slot_key, false)
 			_bump_membership("entity_relationship_removed")
 
 	relationship_removed.emit(entity, relationship)
@@ -2126,6 +2158,93 @@ func _end_suppress() -> void:
 		_bump_membership("deferred_pending")
 
 
+## Open a deferred-move window: structural handlers queue touched entities instead
+## of moving them between archetypes per operation. Returns true if this call opened
+## the window (the caller then owns closing it via _end_deferred_moves); false if a
+## window was already open (nested CommandBuffer.execute during observer flush).
+func _begin_deferred_moves() -> bool:
+	if _defer_archetype_moves:
+		return false
+	_defer_archetype_moves = true
+	return true
+
+
+## Close the deferred-move window and commit ONE archetype transition per touched
+## entity (final signature computed once from the entity's current state).
+func _end_deferred_moves() -> void:
+	_defer_archetype_moves = false
+	for entity in _deferred_move_entities:
+		if is_instance_valid(entity) and _deferred_move_set.has(entity):
+			_commit_move(entity)
+	_deferred_move_entities.clear()
+	_deferred_move_set.clear()
+
+
+## Record an entity as needing an archetype move when the deferred window closes.
+func _queue_deferred_move(entity: Entity) -> void:
+	if not _deferred_move_set.has(entity):
+		_deferred_move_set[entity] = true
+		_deferred_move_entities.append(entity)
+
+
+## Commit one entity's pending deferred move immediately — used before entity
+## add/remove ops inside a command flush so they see consistent archetype state.
+## No-op if the entity has no pending move.
+func _commit_deferred_move(entity: Entity) -> void:
+	if _deferred_move_set.has(entity):
+		_deferred_move_set.erase(entity)
+		_deferred_move_entities.erase(entity)
+		_commit_move(entity)
+
+
+## Move an entity to the archetype matching its CURRENT components/relationships —
+## one signature calc, one transition. Shared by deferred-move commits and the
+## batch paths in Entity.add_components/remove_components.
+func _commit_move(entity: Entity) -> void:
+	if not entity_to_archetype.has(entity):
+		return
+	var old_archetype: Archetype = entity_to_archetype[entity]
+	var new_signature = _calculate_entity_signature(entity)
+	var comp_types = _get_entity_archetype_keys(entity)
+	var new_archetype = _get_or_create_archetype(new_signature, comp_types)
+	if new_archetype == old_archetype:
+		# Same archetype — refresh column data in case component instances were
+		# replaced (add_component over an existing key) during the batch.
+		var entity_index = old_archetype.entity_to_index[entity]
+		for comp_key in entity.components:
+			if old_archetype.columns.has(comp_key):
+				old_archetype.columns[comp_key][entity_index] = entity.components[comp_key]
+		return
+	old_archetype.remove_entity(entity)
+	new_archetype.add_entity(entity)
+	entity_to_archetype[entity] = new_archetype
+	if old_archetype.is_empty():
+		_delete_archetype(old_archetype)
+
+
+## Recompute this entity's archetype now — or queue it if a deferred-move window
+## is open. Entry point for Entity.add_components/remove_components batches.
+func _refresh_entity_archetype(entity: Entity) -> void:
+	if not entity_to_archetype.has(entity):
+		return
+	if _defer_archetype_moves:
+		_queue_deferred_move(entity)
+	else:
+		_commit_move(entity)
+
+
+## Debug-mode aid: flag direct structural mutation while a zero-copy system
+## iteration is in progress (swap-remove can skip entities mid-loop). The
+## mutation still proceeds — this is guidance, not enforcement.
+func _warn_structural_change_during_iteration(what: String, entity: Entity) -> void:
+	push_error(
+		(
+			"GECS: %s on '%s' during zero-copy system iteration. Route structural changes through cmd (CommandBuffer) inside process(), or set safe_iteration = true on the system."
+			% [what, entity.name if entity else "<null>"]
+		)
+	)
+
+
 ## Get the stable ecs_id of a relationship's target entity.
 ## Returns 0 if target is not an Entity.
 func _get_relationship_target_id(relationship: Relationship) -> int:
@@ -2141,17 +2260,21 @@ func _on_entity_relationships_batch_added(entity: Entity, _relationships: Array)
 
 	# STRUCTURAL: Single archetype transition using fully-updated signature
 	if entity_to_archetype.has(entity):
-		var old_archetype = entity_to_archetype[entity]
-		var new_signature = _calculate_entity_signature(entity)
-		var comp_types = _get_entity_archetype_keys(entity)
-		var new_archetype = _get_or_create_archetype(new_signature, comp_types)
-		if old_archetype != new_archetype:
-			old_archetype.remove_entity(entity)
-			new_archetype.add_entity(entity)
-			entity_to_archetype[entity] = new_archetype
-			if old_archetype.is_empty():
-				_delete_archetype(old_archetype)
+		if _defer_archetype_moves:
+			_queue_deferred_move(entity)
 			moved = true
+		else:
+			var old_archetype = entity_to_archetype[entity]
+			var new_signature = _calculate_entity_signature(entity)
+			var comp_types = _get_entity_archetype_keys(entity)
+			var new_archetype = _get_or_create_archetype(new_signature, comp_types)
+			if old_archetype != new_archetype:
+				old_archetype.remove_entity(entity)
+				new_archetype.add_entity(entity)
+				entity_to_archetype[entity] = new_archetype
+				if old_archetype.is_empty():
+					_delete_archetype(old_archetype)
+				moved = true
 
 	_end_suppress()
 	# If entity moved to an existing archetype, _end_suppress may not have
@@ -2178,17 +2301,21 @@ func _on_entity_relationships_batch_removed(entity: Entity, _relationships: Arra
 
 	# STRUCTURAL: Single archetype transition
 	if entity_to_archetype.has(entity):
-		var old_archetype = entity_to_archetype[entity]
-		var new_signature = _calculate_entity_signature(entity)
-		var comp_types = _get_entity_archetype_keys(entity)
-		var new_archetype = _get_or_create_archetype(new_signature, comp_types)
-		if old_archetype != new_archetype:
-			old_archetype.remove_entity(entity)
-			new_archetype.add_entity(entity)
-			entity_to_archetype[entity] = new_archetype
-			if old_archetype.is_empty():
-				_delete_archetype(old_archetype)
+		if _defer_archetype_moves:
+			_queue_deferred_move(entity)
 			moved = true
+		else:
+			var old_archetype = entity_to_archetype[entity]
+			var new_signature = _calculate_entity_signature(entity)
+			var comp_types = _get_entity_archetype_keys(entity)
+			var new_archetype = _get_or_create_archetype(new_signature, comp_types)
+			if old_archetype != new_archetype:
+				old_archetype.remove_entity(entity)
+				new_archetype.add_entity(entity)
+				entity_to_archetype[entity] = new_archetype
+				if old_archetype.is_empty():
+					_delete_archetype(old_archetype)
+				moved = true
 
 	_end_suppress()
 	if moved:

@@ -338,6 +338,11 @@ func test_projectile_mixed_archetypes():
 ## Simulates the ProjectileSystem: travelling_subsys adds collision, collision_subsys processes
 class ProjectileCollisionSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var travelling_count = 0
 	var collisions_added = 0
 	var collision_count = 0
@@ -372,6 +377,11 @@ class ProjectileCollisionSystem:
 ## System where only SOME entities collide
 class ProjectilePartialCollisionSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var travelling_count = 0
 	var collisions_added = 0
 	var collision_count = 0
@@ -404,6 +414,11 @@ class ProjectilePartialCollisionSystem:
 ## System that removes entities after collision handling
 class ProjectileCollisionRemovalSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var travelling_count = 0
 	var collision_count = 0
 	var entities_removed = []
@@ -436,6 +451,11 @@ class ProjectileCollisionRemovalSystem:
 ## System that exactly mirrors your ProjectileSystem structure
 class ExactProjectileSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var travelling_count = 0
 	var collision_count = 0
 

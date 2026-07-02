@@ -72,11 +72,16 @@ enum FlushMode { PER_SYSTEM, PER_GROUP, MANUAL }
 @export var command_buffer_flush_mode: FlushMode = FlushMode.PER_SYSTEM
 
 @export_group("Iteration")
-## When true (default), entity arrays are copied before iteration to guard against
-## mutation skipping from mid-iteration structural changes (add/remove component).
-## Set to false when ALL structural changes go through [member cmd] (CommandBuffer),
-## since deferred commands never mutate during iteration — skipping the copy entirely.
-@export var safe_iteration: bool = true
+## When false (the default since v9), systems iterate the archetype entity arrays
+## directly — zero-copy. ALL structural changes made during iteration must go
+## through [member cmd] (CommandBuffer); direct add/remove during the loop can
+## skip entities via swap-remove (a debug-mode error points offenders at cmd).
+## Set to true to restore the v8 behavior: entity arrays are copied before
+## iteration so direct structural mutation mid-loop stays safe, at the cost of
+## a per-archetype allocation every frame.
+## Project-wide escape hatch: set the [code]gecs/settings/safe_iteration_default[/code]
+## project setting to true to flip the default back for every system.
+@export var safe_iteration: bool = GecsSettings.get_safe_iteration_default()
 
 @export_group("Profiling")
 ## When true, registers a custom entry named [code]<script_name> - [GECS][/code]
@@ -426,10 +431,18 @@ func _handle(delta: float) -> void:
 		}
 	if _has_subsystems_cached == -1:
 		_has_subsystems_cached = 1 if not sub_systems().is_empty() else 0
+	# Track unsafe-iteration depth so the world can flag direct structural
+	# mutation during zero-copy iteration (debug aid; safe_iteration systems
+	# copy their arrays and are exempt).
+	var track_iteration := not safe_iteration and _world != null
+	if track_iteration:
+		_world._iteration_depth += 1
 	if _has_subsystems_cached == 1:
 		_run_subsystems(delta)
 	else:
 		_run_process(delta)
+	if track_iteration:
+		_world._iteration_depth -= 1
 	# Flush command buffer if mode is PER_SYSTEM
 	if command_buffer_flush_mode == FlushMode.PER_SYSTEM and has_pending_commands():
 		cmd.execute()
@@ -529,7 +542,10 @@ func _run_subsystems(delta: float) -> void:
 				if enabled_filter != null:
 					arch_entities = archetype.get_entities_by_enabled_state(enabled_filter)
 				else:
-					arch_entities = archetype.entities.duplicate()
+					# Zero-copy unless safe_iteration opted back in (see _run_process)
+					arch_entities = (
+						archetype.entities.duplicate() if safe_iteration else archetype.entities
+					)
 				if arch_entities.is_empty():
 					continue
 				total_entity_count += arch_entities.size()
