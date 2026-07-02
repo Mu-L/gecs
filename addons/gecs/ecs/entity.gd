@@ -76,6 +76,11 @@ var components: Dictionary = {}
 ## Relationships attached to the entity
 var relationships: Array[Relationship] = []
 
+## Relationship bucket index: relation script instance_id -> Array[Relationship].
+## Narrows get/has_relationship scans from O(all rels) to O(rels of that type);
+## wildcard probes (relation == null) fall back to the full array.
+var _rels_by_relation: Dictionary = {}
+
 ## Cache for component keys to avoid repeated .get_script().get_instance_id() calls
 var _component_key_cache: Dictionary = {}
 
@@ -397,6 +402,41 @@ func has_component(component: Resource) -> bool:
 #region Relationships
 
 
+## Bucket key for the relationship index (0 = unbucketed/wildcard).
+static func _rel_bucket_key(rel: Relationship) -> int:
+	if rel == null or rel.relation == null:
+		return 0
+	var script = rel.relation.get_script()
+	return script.get_instance_id() if script else 0
+
+
+func _rel_index_add(rel: Relationship) -> void:
+	var key := _rel_bucket_key(rel)
+	if key == 0:
+		return
+	var bucket: Array = _rels_by_relation.get(key, [])
+	if bucket.is_empty():
+		_rels_by_relation[key] = bucket
+	bucket.append(rel)
+
+
+func _rel_index_remove(rel: Relationship) -> void:
+	var key := _rel_bucket_key(rel)
+	if key == 0:
+		return
+	var bucket = _rels_by_relation.get(key)
+	if bucket != null:
+		bucket.erase(rel)
+
+
+## Candidate list for a probe: the type bucket when the probe names a relation,
+## the full array for wildcard probes.
+func _rel_candidates(probe: Relationship) -> Array:
+	if probe == null or probe.relation == null:
+		return relationships
+	return _rels_by_relation.get(_rel_bucket_key(probe), [])
+
+
 ## Adds a relationship to this entity.[br]
 ## [param relationship] The [Relationship] to add.
 func add_relationship(relationship: Relationship) -> void:
@@ -406,6 +446,7 @@ func add_relationship(relationship: Relationship) -> void:
 	)
 	relationship.source = self
 	relationships.append(relationship)
+	_rel_index_add(relationship)
 	if _world:
 		_world._on_entity_relationship_added(self, relationship)
 	relationship_added.emit(self, relationship)
@@ -419,6 +460,7 @@ func add_relationships(_relationships: Array):
 		)
 		relationship.source = self
 		relationships.append(relationship)
+		_rel_index_add(relationship)
 	if _world:
 		_world._on_entity_relationships_batch_added(self, _relationships)
 	relationships_batch_added.emit(self, _relationships)
@@ -455,7 +497,7 @@ func remove_relationship(relationship: Relationship, limit: int = -1) -> void:
 		pattern_remove = false
 
 	if pattern_remove:
-		for rel in relationships:
+		for rel in _rel_candidates(relationship):
 			if rel.matches(relationship):
 				to_remove.append(rel)
 				removed_count += 1
@@ -465,6 +507,7 @@ func remove_relationship(relationship: Relationship, limit: int = -1) -> void:
 
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
 		if _world:
 			_world._on_entity_relationship_removed(self, rel)
 		relationship_removed.emit(self, rel)
@@ -487,7 +530,7 @@ func remove_relationships(_relationships: Array, limit: int = -1):
 			to_remove.append(relationship)
 			pattern_remove = false
 		if pattern_remove:
-			for rel in relationships:
+			for rel in _rel_candidates(relationship):
 				if rel.matches(relationship):
 					to_remove.append(rel)
 					removed_count += 1
@@ -495,6 +538,7 @@ func remove_relationships(_relationships: Array, limit: int = -1):
 						break
 		for rel in to_remove:
 			relationships.erase(rel)
+			_rel_index_remove(rel)
 			if _world:
 				_world._on_entity_relationship_removed(self, rel)
 			relationship_removed.emit(self, rel)
@@ -505,6 +549,7 @@ func remove_all_relationships() -> void:
 	var to_remove = relationships.duplicate()
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
 		if _world:
 			_world._on_entity_relationship_removed(self, rel)
 		relationship_removed.emit(self, rel)
@@ -515,7 +560,7 @@ func remove_all_relationships() -> void:
 ## [return] The first matching [Relationship] if it exists, otherwise `null`
 func get_relationship(relationship: Relationship) -> Relationship:
 	var to_remove = []
-	for rel in relationships:
+	for rel in _rel_candidates(relationship):
 		# Check if the relationship is valid
 		if not rel.valid():
 			to_remove.append(rel)
@@ -524,11 +569,13 @@ func get_relationship(relationship: Relationship) -> Relationship:
 			# Remove invalid relationships before returning
 			for invalid_rel in to_remove:
 				relationships.erase(invalid_rel)
+				_rel_index_remove(invalid_rel)
 				relationship_removed.emit(self, invalid_rel)
 			return rel
 	# Remove invalid relationships
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
 		relationship_removed.emit(self, rel)
 	return null
 
@@ -539,7 +586,7 @@ func get_relationship(relationship: Relationship) -> Relationship:
 func get_relationships(relationship: Relationship) -> Array[Relationship]:
 	var results: Array[Relationship] = []
 	var to_remove = []
-	for rel in relationships:
+	for rel in _rel_candidates(relationship):
 		# Check if the relationship is valid
 		if not rel.valid():
 			to_remove.append(rel)
@@ -549,6 +596,7 @@ func get_relationships(relationship: Relationship) -> Array[Relationship]:
 	# Remove invalid relationships
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
 		relationship_removed.emit(self, rel)
 	return results
 
@@ -557,7 +605,7 @@ func get_relationships(relationship: Relationship) -> Array[Relationship]:
 ## Fast path — skips validation/cleanup (use get_relationship when you need the value).[br]
 ## [param relationship] The [Relationship] to check for.
 func has_relationship(relationship: Relationship) -> bool:
-	for rel in relationships:
+	for rel in _rel_candidates(relationship):
 		if rel.matches(relationship):
 			return true
 	return false
