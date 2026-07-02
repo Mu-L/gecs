@@ -136,6 +136,14 @@ var cache_version: int = 0
 ## Monotonic archetype-set version — incremented only when an archetype is
 ## created or deleted. Diagnostic counter for the incremental cache maintenance.
 var archetype_set_version: int = 0
+## CHANGE DETECTION: the world-visible write clock (mirrors
+## Archetype.global_change_tick; advanced once per system run).
+var change_tick: int:
+	get:
+		return Archetype.global_change_tick
+## Component keys some query tracks via .changed(). Empty (the common case)
+## means property writes pay only one is_empty() check for change detection.
+var _change_tracked_keys: Dictionary = {}
 var _cache_invalidation_reasons: Dictionary = {}  # reason -> count
 ## Global cache: script_instance_id (int) -> Script (loaded once, reused forever)
 var _component_script_cache: Dictionary = {}  # int -> Script
@@ -940,6 +948,9 @@ func _on_entity_component_property_change(
 	old_value: Variant,
 	new_value: Variant,
 ) -> void:
+	# CHANGE DETECTION: stamp the row version (one dict check when unused)
+	if not _change_tracked_keys.is_empty():
+		_mark_component_changed(entity, component)
 	# Notify the World to trigger observers
 	_handle_observer_component_changed(entity, component, property_name, new_value, old_value)
 	# Re-evaluate monitor queries whose filters include property-query criteria on this
@@ -2221,6 +2232,29 @@ func set_entity_range(base_index: int) -> void:
 		_slot_generations.resize(base_index)  # zero-filled; never enters _free_slots
 
 
+## CHANGE DETECTION: start tracking write versions for a component key.
+## Called lazily the first time a query declares .changed([C_X]); retrofits
+## version columns onto every existing archetype holding that component.
+func _register_change_tracking(comp_key: int) -> void:
+	if _change_tracked_keys.has(comp_key):
+		return
+	_change_tracked_keys[comp_key] = true
+	for archetype in archetypes.values():
+		archetype.ensure_change_tracking(comp_key)
+
+
+## CHANGE DETECTION: stamp an entity's row for [param component] with the
+## current write tick. Called from the property-change path for setter-emitting
+## components, and from Entity.mark_changed for components mutated directly.
+func _mark_component_changed(entity: Entity, component: Resource) -> void:
+	var archetype = entity_to_archetype.get(entity)
+	if archetype == null:
+		return
+	var comp_key: int = component.get_script().get_instance_id()
+	if _change_tracked_keys.has(comp_key):
+		archetype.mark_changed(comp_key, entity)
+
+
 ## Ensure an entity has an id, allocating a handle if needed. Used for
 ## relationship targets referenced before they're added to the world.
 func _ensure_entity_id(entity: Entity) -> int:
@@ -2586,6 +2620,10 @@ func _get_or_create_archetype(signature: int, component_types: Array) -> Archety
 	if is_new:
 		var archetype = Archetype.new(signature, component_types)
 		archetypes[signature] = archetype
+		# CHANGE DETECTION: new archetypes get version columns for tracked keys
+		if not _change_tracked_keys.is_empty():
+			for tracked_key in _change_tracked_keys:
+				archetype.ensure_change_tracking(tracked_key)
 		_worldLogger.trace("Created new archetype: ", archetype)
 		if ECS.debug and not _archetype_explosion_warned and archetypes.size() > 500:
 			# Count only non-empty archetypes — empties are retained by design

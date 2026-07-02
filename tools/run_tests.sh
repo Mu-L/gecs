@@ -51,7 +51,15 @@ godot_pids() {
 # Snapshot pre-existing Godot PIDs (e.g. the user's open editor) — never kill these.
 BEFORE_PIDS="$(godot_pids)"
 
-timeout "$TIMEOUT" ./addons/gdUnit4/runtest.cmd "${ARGS[@]}" -c >"$LOG" 2>&1
+# Launch Godot DIRECTLY: headless (no window) and WITHOUT the -d debug flag
+# that runtest.cmd hardcodes — on dev builds -d turns every script error into
+# an interactive "debug>" prompt that hangs forever. Without it, errors print
+# and the run keeps going.
+# EXTRA_GODOT_ARGS: optional engine-level args (e.g. --no-gecs-debug for
+# release-path benchmark numbers — ECS.debug adds ~20ms/frame of overhead).
+timeout "$TIMEOUT" "$GODOT_BIN" --headless ${EXTRA_GODOT_ARGS:-} --path . \
+	-s res://addons/gdUnit4/bin/GdUnitCmdTool.gd \
+	"${ARGS[@]}" -c --ignoreHeadlessMode >"$LOG" 2>&1
 STATUS=$?
 
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' "$LOG"; }
@@ -73,7 +81,14 @@ fi
 SUMMARY="$(strip_ansi | grep -E '^Overall Summary' | tail -1)"
 FAILED_TESTS="$(strip_ansi | grep ' FAILED' | sed 's/^[[:space:]]*//' | sort -u | head -25)"
 
-echo "${SUMMARY:-RESULT: no summary produced (exit=$STATUS) — log: $LOG}"
+if [[ -z "$SUMMARY" ]]; then
+	echo "RESULT: BROKEN RUN (exit=$STATUS, no summary) — first errors:"
+	strip_ansi | grep -m 5 -iE "error|not found|No such file" | sed 's/^[[:space:]]*//'
+	echo "Full log: $LOG"
+	exit 2
+fi
+
+echo "$SUMMARY"
 if [[ -n "$FAILED_TESTS" ]]; then
 	echo "FAILED:"
 	echo "$FAILED_TESTS"

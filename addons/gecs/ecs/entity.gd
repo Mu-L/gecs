@@ -387,14 +387,35 @@ func remove_all_components() -> void:
 ## [b]Example:[/b]
 ##     [codeblock]var transform = entity.get_component(Transform)[/codeblock]
 func get_component(component: Resource) -> Component:
-	return components.get(_comp_key(component), null)
+	# Inlined key derivation — this is the hottest call in non-iterate() systems,
+	# and the _comp_key call itself costs ~0.6us of dispatch overhead.
+	return components.get(
+		component.get_instance_id() if component is Script else component.get_script().get_instance_id(),
+		null
+	)
 
 
 ## Check to see if an entity has a  specific component on it.[br]
 ## This is useful when you're checking to see if it has a component and not going to use the component itself.[br]
 ## If you plan on getting and using the component, use [method get_component] instead.
 func has_component(component: Resource) -> bool:
-	return components.has(_comp_key(component))
+	# Inlined key derivation — see get_component
+	return components.has(
+		component.get_instance_id() if component is Script else component.get_script().get_instance_id()
+	)
+
+
+## CHANGE DETECTION: mark a component as written for queries using .changed().
+## Components whose setters emit [signal Component.property_changed] are stamped
+## automatically — call this only for components mutated directly (no setter).
+## [codeblock]
+## var pos = entity.get_component(C_Position)
+## pos.position.x += 10.0  # direct write, no property_changed emit
+## entity.mark_changed(pos)
+## [/codeblock]
+func mark_changed(component: Resource) -> void:
+	if _world:
+		_world._mark_component_changed(self, component)
 
 
 #endregion Components

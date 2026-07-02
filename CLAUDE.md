@@ -19,6 +19,47 @@ The framework is built around six main classes:
 - **CommandBuffer** (`addons/gecs/ecs/command_buffer.gd`): Callable-based deferred execution buffer for safe structural changes during iteration.
 - **ECS Singleton** (`addons/gecs/ecs.gd`): Global access point for the current World instance. Also handles deferred system setup timing.
 
+### v9.0 Breaking Changes (performance overhaul)
+
+v9 is a major performance release. See `addons/gecs/docs/PERFORMANCE.md` for the
+audit, FLECS comparison, and benchmark workflow. The breaking changes:
+
+1. **`Entity.id` is an int generational handle** (low 32 bits slot index, high 32
+   generation). It replaces BOTH the v8 String UUID `id` and the internal `ecs_id`.
+   Semantic string ids (`entity.id = "singleton_player"`) become the new
+   `Entity.alias: StringName` + `world.get_entity_by_alias()` (same
+   replace-on-collision singleton semantics). `world.get_entity_by_id(id: int)`,
+   `is_alive(id)`. Pre-assign a nonzero id before `add_entity` to keep a foreign
+   identity (deserialization/network). Legacy String-UUID saves load via a shim.
+   Network clients call `world.set_entity_range(base)` so local spawns can't
+   collide with server handles.
+2. **`System.safe_iteration` defaults to `false`** — systems iterate archetype
+   arrays zero-copy. Structural changes during iteration MUST go through `cmd`
+   (a debug-mode error flags direct mutation). Opt back into v8 copying per
+   system (`safe_iteration = true`) or project-wide
+   (`gecs/settings/safe_iteration_default`).
+3. **Empty archetypes are retained** (their transition edges survive churn).
+   `world.compact()` reclaims them at quiet points. `world.entities` order is
+   NOT stable across removals (O(1) swap-remove).
+4. **`cache_invalidated` semantics**: still fires per structural change, but the
+   query→archetype cache is maintained incrementally and never wiped by entity
+   moves; `world.query` no longer signal-connects vended builders.
+5. **CommandBuffer coalesces archetype moves**: signals/observers fire per-op in
+   queued order, but each touched entity gets ONE archetype transition per flush.
+
+### Running tests (IMPORTANT)
+
+ALWAYS use the hang-safe compact runner — never `runtest.cmd` directly (its `-d`
+flag turns any script error into an interactive debugger prompt that hangs
+forever, and its output is enormous):
+
+```bash
+tools/run_tests.sh [-t seconds] res://addons/gecs/tests/core [more paths...]
+```
+
+Prints only the summary line + failed test names. Exit codes: 0 pass, 1 fail,
+124 hang (kills only the Godot processes it spawned).
+
 ### Query System
 
 The QueryBuilder (`addons/gecs/query_builder.gd`) provides powerful entity filtering:
@@ -28,6 +69,11 @@ The QueryBuilder (`addons/gecs/query_builder.gd`) provides powerful entity filte
 - `with_none([Components])` - Entities must not have these components
 - `with_relationship([Relations])` - Entities must have these relationships
 - `with_group("group_name")` - Filter by Godot groups
+- `changed([Components])` - CHANGE DETECTION (v9): only entities whose listed
+  components were written since the system last ran; systems skip untouched
+  archetypes entirely. Writes are detected from setters emitting
+  `property_changed`; call `entity.mark_changed(comp)` after direct mutation.
+  Outside systems, pair with `since(tick)` vs `world.change_tick`.
 
 ### Sub-Systems
 
