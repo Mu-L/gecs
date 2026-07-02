@@ -407,21 +407,11 @@ func add_entity(entity: Entity, components = null, add_to_tree = true) -> void:
 	# Update index
 	_worldLogger.debug("add_entity Adding Entity to World: ", entity)
 
-	# Connect to entity signals for components so we can track global component state
-	if not entity.component_added.is_connected(_on_entity_component_added):
-		entity.component_added.connect(_on_entity_component_added)
-	if not entity.component_removed.is_connected(_on_entity_component_removed):
-		entity.component_removed.connect(_on_entity_component_removed)
-	if not entity.relationship_added.is_connected(_on_entity_relationship_added):
-		entity.relationship_added.connect(_on_entity_relationship_added)
-	if not entity.relationship_removed.is_connected(_on_entity_relationship_removed):
-		entity.relationship_removed.connect(_on_entity_relationship_removed)
-	if not entity.relationships_batch_added.is_connected(_on_entity_relationships_batch_added):
-		entity.relationships_batch_added.connect(_on_entity_relationships_batch_added)
-	if not entity.relationships_batch_removed.is_connected(_on_entity_relationships_batch_removed):
-		entity.relationships_batch_removed.connect(_on_entity_relationships_batch_removed)
+	# Track this entity: structural mutations notify the world via DIRECT calls
+	# (entity._world backref) — replaces six signal connects per entity.
+	entity._world = self
 
-	#  Add the entity to the tree if it's not already there after hooking up the signals
+	#  Add the entity to the tree if it's not already there after hooking up tracking
 	# This ensures that any _ready methods on the entity or its components are called after setup
 	if add_to_tree and not entity.is_inside_tree():
 		get_node(entity_nodes_root).add_child(entity)
@@ -429,21 +419,22 @@ func add_entity(entity: Entity, components = null, add_to_tree = true) -> void:
 	# add entity to our list
 	entities.append(entity)
 
-	# OPTIMIZATION: Suppress cache invalidation during entity initialization.
-	# _add_entity_to_archetype and each component_added signal would each
-	# invalidate the cache individually. Defer to a single invalidation at the end.
+	# OPTIMIZATION: Suppress cache invalidation during entity initialization —
+	# one membership bump for the entire add_entity operation.
 	_begin_suppress()
 
-	# ARCHETYPE: Add entity to archetype system BEFORE initialization
-	# Start with empty archetype, then move as components are added
-	_add_entity_to_archetype(entity)
-
-	# initialize the entity and its components in game only
-	# This will trigger component_added signals which move the entity to the right archetype
+	# Initialize the entity BEFORE inserting it into an archetype. The entity is
+	# not yet tracked in entity_to_archetype, so the per-component component_added
+	# emits skip all archetype work (observers/monitors still fire per component) —
+	# spawning an entity with N components costs ZERO archetype transitions here.
 	if not Engine.is_editor_hint():
 		entity._initialize(components if components else [])
 
-	# Re-enable and perform a single cache invalidation for the entire add_entity operation
+	# ARCHETYPE: Single insert with the final signature (components + relationships
+	# all present) — no intermediate archetypes are ever created.
+	_add_entity_to_archetype(entity)
+
+	# Re-enable and perform a single membership bump for the entire add_entity operation
 	_end_suppress()
 
 	entity_added.emit(entity)
@@ -498,21 +489,11 @@ func remove_entity(entity: Entity) -> void:
 	# REMOVE policy: Clean up relationships pointing TO this entity from other entities
 	_cleanup_relationships_to_target(entity)
 
-	# Disconnect entity signals before notifying observers to prevent re-entrancy:
+	# Stop tracking before notifying observers to prevent re-entrancy:
 	# if a REMOVED observer callback calls entity.remove_component() as a side effect,
-	# the signal must not be connected or it will double-notify observers watching that component.
-	if entity.component_added.is_connected(_on_entity_component_added):
-		entity.component_added.disconnect(_on_entity_component_added)
-	if entity.component_removed.is_connected(_on_entity_component_removed):
-		entity.component_removed.disconnect(_on_entity_component_removed)
-	if entity.relationship_added.is_connected(_on_entity_relationship_added):
-		entity.relationship_added.disconnect(_on_entity_relationship_added)
-	if entity.relationship_removed.is_connected(_on_entity_relationship_removed):
-		entity.relationship_removed.disconnect(_on_entity_relationship_removed)
-	if entity.relationships_batch_added.is_connected(_on_entity_relationships_batch_added):
-		entity.relationships_batch_added.disconnect(_on_entity_relationships_batch_added)
-	if entity.relationships_batch_removed.is_connected(_on_entity_relationships_batch_removed):
-		entity.relationships_batch_removed.disconnect(_on_entity_relationships_batch_removed)
+	# the world must not be re-notified or it would double-notify observers watching
+	# that component. Clearing the backref makes the entity's direct calls no-ops.
+	entity._world = null
 
 	# Emit component_removed for each component before teardown
 	# so observers learn about removal when an entity is destroyed
@@ -583,18 +564,8 @@ func disable_entity(entity) -> Entity:
 	entity_disabled.emit(entity)
 	_worldLogger.debug("disable_entity Disabling Entity: ", entity)
 
-	if entity.component_added.is_connected(_on_entity_component_added):
-		entity.component_added.disconnect(_on_entity_component_added)
-	if entity.component_removed.is_connected(_on_entity_component_removed):
-		entity.component_removed.disconnect(_on_entity_component_removed)
-	if entity.relationship_added.is_connected(_on_entity_relationship_added):
-		entity.relationship_added.disconnect(_on_entity_relationship_added)
-	if entity.relationship_removed.is_connected(_on_entity_relationship_removed):
-		entity.relationship_removed.disconnect(_on_entity_relationship_removed)
-	if entity.relationships_batch_added.is_connected(_on_entity_relationships_batch_added):
-		entity.relationships_batch_added.disconnect(_on_entity_relationships_batch_added)
-	if entity.relationships_batch_removed.is_connected(_on_entity_relationships_batch_removed):
-		entity.relationships_batch_removed.disconnect(_on_entity_relationships_batch_removed)
+	# Stop tracking — the entity's direct world calls become no-ops while disabled.
+	entity._world = null
 	entity.on_disable()
 	entity.set_process(false)
 	entity.set_physics_process(false)
@@ -632,19 +603,8 @@ func enable_entity(entity: Entity, components = null) -> void:
 	entity.enabled = true  # This will trigger _on_entity_enabled_changed via setter
 	entity_enabled.emit(entity)
 
-	# Connect to entity signals for components so we can track global component state
-	if not entity.component_added.is_connected(_on_entity_component_added):
-		entity.component_added.connect(_on_entity_component_added)
-	if not entity.component_removed.is_connected(_on_entity_component_removed):
-		entity.component_removed.connect(_on_entity_component_removed)
-	if not entity.relationship_added.is_connected(_on_entity_relationship_added):
-		entity.relationship_added.connect(_on_entity_relationship_added)
-	if not entity.relationship_removed.is_connected(_on_entity_relationship_removed):
-		entity.relationship_removed.connect(_on_entity_relationship_removed)
-	if not entity.relationships_batch_added.is_connected(_on_entity_relationships_batch_added):
-		entity.relationships_batch_added.connect(_on_entity_relationships_batch_added)
-	if not entity.relationships_batch_removed.is_connected(_on_entity_relationships_batch_removed):
-		entity.relationships_batch_removed.connect(_on_entity_relationships_batch_removed)
+	# Resume tracking — structural mutations notify the world directly again.
+	entity._world = self
 
 	if components:
 		entity.add_components(components)
@@ -806,6 +766,24 @@ func purge(should_free = true, keep := []) -> void:
 		queue_free()
 
 
+## Delete all EMPTY archetypes and their transition edges, reclaiming memory.
+## Empty archetypes are normally kept so spawn/despawn churn reuses them (and
+## their O(1) transition edges). Call this at a known quiet point (level change,
+## loading screen) if long play sessions accumulate many stale compositions.
+## Returns the number of archetypes deleted.
+func compact() -> int:
+	var to_delete: Array = []
+	for archetype in archetypes.values():
+		if archetype.is_empty():
+			to_delete.append(archetype)
+	for archetype in to_delete:
+		_delete_archetype(archetype)
+	if not to_delete.is_empty():
+		_invalidate_cache_full("compact")
+		_archetype_explosion_warned = false
+	return to_delete.size()
+
+
 ## Executes a query to retrieve entities based on component criteria.[br]
 ## [param all_components] [Component]s that [Entity]s must have all of.[br]
 ## [param any_components] [Component]s that [Entity]s must have at least one of.[br]
@@ -872,8 +850,7 @@ func _on_entity_component_added(entity: Entity, component: Resource) -> void:
 	_handle_observer_component_added(entity, component)
 	if component != null and component.get_script() != null:
 		_evaluate_monitors_for_entity(entity, [component.get_script().resource_path])
-	if not entity.component_property_changed.is_connected(_on_entity_component_property_change):
-		entity.component_property_changed.connect(_on_entity_component_property_change)
+	# (Property changes arrive via the entity's direct _world call — no signal hop.)
 	if ECS.debug:
 		assert(GECSEditorDebuggerMessages.entity_component_added(entity, component), "")
 
@@ -2218,8 +2195,7 @@ func _commit_move(entity: Entity) -> void:
 	old_archetype.remove_entity(entity)
 	new_archetype.add_entity(entity)
 	entity_to_archetype[entity] = new_archetype
-	if old_archetype.is_empty():
-		_delete_archetype(old_archetype)
+	# Empty old archetype is kept — see _remove_entity_from_archetype.
 
 
 ## Recompute this entity's archetype now — or queue it if a deferred-move window
@@ -2272,8 +2248,6 @@ func _on_entity_relationships_batch_added(entity: Entity, _relationships: Array)
 				old_archetype.remove_entity(entity)
 				new_archetype.add_entity(entity)
 				entity_to_archetype[entity] = new_archetype
-				if old_archetype.is_empty():
-					_delete_archetype(old_archetype)
 				moved = true
 
 	_end_suppress()
@@ -2313,8 +2287,6 @@ func _on_entity_relationships_batch_removed(entity: Entity, _relationships: Arra
 				old_archetype.remove_entity(entity)
 				new_archetype.add_entity(entity)
 				entity_to_archetype[entity] = new_archetype
-				if old_archetype.is_empty():
-					_delete_archetype(old_archetype)
 				moved = true
 
 	_end_suppress()
@@ -2499,16 +2471,23 @@ func _get_or_create_archetype(signature: int, component_types: Array) -> Archety
 		archetypes[signature] = archetype
 		_worldLogger.trace("Created new archetype: ", archetype)
 		if ECS.debug and not _archetype_explosion_warned and archetypes.size() > 500:
-			_archetype_explosion_warned = true
-			(
-				_worldLogger
-				.error(
-					(
-						"Archetype explosion: %d archetypes created. Each unique (Relation, Target) pair creates a new archetype — check for unintended relationship cardinality."
-						% archetypes.size()
+			# Count only non-empty archetypes — empties are retained by design
+			# and reclaimable via World.compact().
+			var non_empty := 0
+			for arch in archetypes.values():
+				if not arch.is_empty():
+					non_empty += 1
+			if non_empty > 500:
+				_archetype_explosion_warned = true
+				(
+					_worldLogger
+					.error(
+						(
+							"Archetype explosion: %d non-empty archetypes (%d total). Each unique (Relation, Target) pair creates a new archetype — check for unintended relationship cardinality. Empty archetypes can be reclaimed with World.compact()."
+							% [non_empty, archetypes.size()]
+						)
 					)
 				)
-			)
 
 		# Register in wildcard index: for each rel:// key, extract relation path
 		for rel_key in archetype.relationship_types:
@@ -2627,9 +2606,9 @@ func _remove_entity_from_archetype(entity: Entity) -> bool:
 	# Membership changed — QueryBuilder execute() caches must know they're stale
 	_bump_membership("entity_removed_from_archetype")
 
-	# Clean up empty archetypes (optional - can keep them for reuse)
-	if archetype.is_empty():
-		_delete_archetype(archetype)
+	# Empty archetypes are KEPT (FLECS-style): their transition edges survive
+	# spawn/despawn churn, and queries skip them via entities.is_empty().
+	# World.compact() reclaims them explicitly.
 
 	return removed
 
@@ -2747,9 +2726,7 @@ func _move_entity_to_new_archetype_fast(
 
 	_worldLogger.trace("Moved entity ", entity.name, " from ", old_archetype, " to ", new_archetype)
 
-	# Clean up empty old archetype
-	if old_archetype.is_empty():
-		_delete_archetype(old_archetype)
+	# Empty old archetype is kept — its edges keep transitions O(1) under churn.
 
 	return new_archetype
 

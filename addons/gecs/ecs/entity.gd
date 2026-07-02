@@ -96,6 +96,13 @@ var _state = {}
 ## Value is 0 until the entity is registered with a World.
 var ecs_id: int = 0
 
+## The [World] currently tracking this entity (set by World.add_entity/enable_entity,
+## cleared by remove_entity/disable_entity). Structural mutations notify it via
+## DIRECT calls instead of signal dispatch — the entity-level signals still emit
+## for user code, but the world is no longer a signal subscriber (a signal emit
+## costs ~3x a direct call, and connect/disconnect per entity lifecycle is gone).
+var _world: World = null
+
 #endregion Public Variables
 
 #region Built-in Virtual Methods
@@ -188,7 +195,10 @@ func add_component(component: Resource) -> void:
 	component.parent = self
 	if not component.property_changed.is_connected(_on_component_property_changed):
 		component.property_changed.connect(_on_component_property_changed)
-	## Adding components happens through a signal
+	# Notify the world directly (archetype move + observer dispatch), then emit
+	# the entity-level signal for user code — same order as the old subscription.
+	if _world:
+		_world._on_entity_component_added(self, component)
 	component_added.emit(self, component)
 	_entityLogger.trace("Added Component: ", comp_key)
 
@@ -199,7 +209,12 @@ func _on_component_property_changed(
 	old_value: Variant,
 	new_value: Variant,
 ) -> void:
-	# Pass this signal on to the world
+	# Single hop: notify the world directly (observer CHANGED dispatch + monitor
+	# eval), then re-emit for user code listening on the entity.
+	if _world:
+		_world._on_entity_component_property_change(
+			self, component, property_name, old_value, new_value
+		)
 	component_property_changed.emit(self, component, property_name, old_value, new_value)
 
 
@@ -237,8 +252,10 @@ func add_components(_components: Array):
 		owns_deferral = ECS.world._begin_deferred_moves()
 		ECS.world._refresh_entity_archetype(self)
 
-	# Emit signals for all added components
+	# Notify world + emit signals for all added components
 	for component in added_components:
+		if _world:
+			_world._on_entity_component_added(self, component)
 		component_added.emit(self, component)
 
 	if owns_deferral:
@@ -271,8 +288,10 @@ func remove_component(component: Resource) -> void:
 		if component_instance.property_changed.is_connected(_on_component_property_changed):
 			component_instance.property_changed.disconnect(_on_component_property_changed)
 
+		# Notify the world directly (archetype move + observer REMOVED), then emit
+		if _world:
+			_world._on_entity_component_removed(self, component_instance)
 		component_removed.emit(self, component_instance)
-		# ARCHETYPE: Signal handler (_on_entity_component_removed) handles archetype update
 		_entityLogger.trace("Removed Component: ", comp_key)
 
 
@@ -327,8 +346,10 @@ func remove_components(_components: Array):
 		owns_deferral = ECS.world._begin_deferred_moves()
 		ECS.world._refresh_entity_archetype(self)
 
-	# Emit signals for all removed components
+	# Notify world + emit signals for all removed components
 	for component in removed_components:
+		if _world:
+			_world._on_entity_component_removed(self, component)
 		component_removed.emit(self, component)
 
 	if owns_deferral:
@@ -373,6 +394,8 @@ func add_relationship(relationship: Relationship) -> void:
 	)
 	relationship.source = self
 	relationships.append(relationship)
+	if _world:
+		_world._on_entity_relationship_added(self, relationship)
 	relationship_added.emit(self, relationship)
 
 
@@ -384,6 +407,8 @@ func add_relationships(_relationships: Array):
 		)
 		relationship.source = self
 		relationships.append(relationship)
+	if _world:
+		_world._on_entity_relationships_batch_added(self, _relationships)
 	relationships_batch_added.emit(self, _relationships)
 
 
@@ -428,6 +453,8 @@ func remove_relationship(relationship: Relationship, limit: int = -1) -> void:
 
 	for rel in to_remove:
 		relationships.erase(rel)
+		if _world:
+			_world._on_entity_relationship_removed(self, rel)
 		relationship_removed.emit(self, rel)
 
 
@@ -456,6 +483,8 @@ func remove_relationships(_relationships: Array, limit: int = -1):
 						break
 		for rel in to_remove:
 			relationships.erase(rel)
+			if _world:
+				_world._on_entity_relationship_removed(self, rel)
 			relationship_removed.emit(self, rel)
 
 
@@ -464,6 +493,8 @@ func remove_all_relationships() -> void:
 	var to_remove = relationships.duplicate()
 	for rel in to_remove:
 		relationships.erase(rel)
+		if _world:
+			_world._on_entity_relationship_removed(self, rel)
 		relationship_removed.emit(self, rel)
 
 
