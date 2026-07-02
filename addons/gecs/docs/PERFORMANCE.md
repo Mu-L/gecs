@@ -85,6 +85,37 @@ The unifying insights:
   feed `RenderingServer` (MultiMesh) / `PhysicsServer` directly instead of one Node per
   entity. See the stress-test example for the Node-bound baseline.
 
+## v9 results (release path: v8 vs v9, both `--no-gecs-debug`, Godot 4.7-dev5, same machine)
+
+Structural mutation and eventing — the audit's targets (@10k unless noted):
+
+| Benchmark | v8 | v9 | Δ |
+|---|---|---|---|
+| State transition via cmd (remove+add) | 1255 ms | 427 ms | **−66%** |
+| State transition direct | 1279 ms | 639 ms | **−50%** |
+| cmd flush isolation | 1218 ms | 377 ms | **−69%** |
+| Bulk spawn (10k, one composition) | 2061 ms | 598 ms | **−71%** |
+| Spawn/despawn churn (1k cycle) | 240 ms | 89 ms | **−63%**, cycle3 ≈ cycle1 |
+| Multiple component adds (1k) | 231 ms | 109 ms | **−53%** |
+| Old worst case: backwards bulk removal | 1272 ms | 127 ms | **−90%** |
+| Entity world-add | 471 ms | 311 ms | −34% |
+| Entity removal | 154 ms | 88 ms | −43% |
+| Monitor transitions (20k transitions) | 3555 ms | 284 ms | **−92%** |
+| Property write, zero observers | 86 ms | 48 ms | −45% |
+| Observer ADDED dispatch | 1104 ms | 740 ms | −33% |
+
+Change detection (v9-only): `changed()` system @10k entities, 1% writes/frame,
+60 frames = **65 ms vs 900 ms** for the equivalent plain system — **13.8×** —
+because untouched archetypes are skipped with one int compare.
+
+Guarded fast paths (must-not-regress): cached query execute, `get/has_component`,
+per-entity iteration, exact relationship queries — all flat-to-better.
+
+Debug-mode note: `gecs/settings/debug_mode = true` costs ~20 ms per
+`world.process()` call in instrumentation alone (measured identical on v8 and
+v9). Benchmark and ship with it off; enable only while using the GECS debugger
+tab.
+
 ## Benchmarking
 
 - Suite: `addons/gecs/tests/performance/` (GdUnit4). Results append to
