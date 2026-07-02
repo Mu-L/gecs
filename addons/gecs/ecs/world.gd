@@ -78,8 +78,21 @@ var systems: Array[System]:
 		for group in systems_by_group.keys():
 			all_systems.append_array(systems_by_group[group])
 		return all_systems
-## ID to [Entity] registry - Prevents duplicate IDs and enables fast ID lookups and singleton behavior
-var entity_id_registry: Dictionary = {}  # String (id) -> Entity
+## ID → [Entity] registry. Keys are int generational handles ([member Entity.id]) —
+## covers both locally allocated handles and pre-assigned foreign ones
+## (network replication / deserialization). Prevents duplicate IDs and enables
+## O(1) ID lookups. Stale handles are never present: a recycled slot has a
+## bumped generation and therefore a different int id.
+var entity_id_registry: Dictionary = {}  # int (id) -> Entity
+## Generation counter per slot index for the handle allocator.
+## handle = index | (generation << 32).
+var _slot_generations: PackedInt64Array = PackedInt64Array()
+## Recycled slot indices available for reuse (LIFO).
+var _free_slots: Array[int] = []
+## Alias registry: StringName → Entity. Aliases are optional semantic NAMES
+## ("singleton_player") — the identity is the int handle. Same-alias adds
+## replace the existing entity (singleton pattern).
+var _entity_aliases: Dictionary = {}
 ## ARCHETYPE STORAGE - Entity storage by component signature for O(1) queries
 ## Maps archetype signature (FNV-1a hash) -> Archetype instance
 var archetypes: Dictionary = {}  # int -> Archetype
@@ -93,8 +106,6 @@ var entity_to_archetype: Dictionary = {}  # Entity -> Archetype
 var query: QueryBuilder:
 	get:
 		return QueryBuilder.new(self)
-## Incrementing counter for stable entity IDs (assigned in add_entity)
-var _next_entity_id: int = 1
 
 ## Relation-type archetype index: maps relation resource_path -> { archetype_signature -> Archetype }
 ## Enables O(1) wildcard relationship queries (find all archetypes with any (RelationType, *) pair)
@@ -376,37 +387,48 @@ func update_pause_state(paused: bool) -> void:
 ## world.add_entity(other_entity, [component_a, component_b])
 ## [/codeblock]
 func add_entity(entity: Entity, components = null, add_to_tree = true) -> void:
-	# Check for ID collision - if entity with same ID exists, replace it
-	var entity_id = GECSIO.uuid() if not entity.id else entity.id
-	entity.id = entity_id  # update entity with it's new id
-
-	if entity_id in entity_id_registry:
-		var existing_entity = entity_id_registry[entity_id]
-		(
-			_worldLogger
-			.debug(
-				"ID collision detected, replacing entity: ",
-				existing_entity.name,
-				" with: ",
-				entity.name,
+	# Identity: keep a pre-assigned nonzero id verbatim (deserialization /
+	# network replication); otherwise allocate a generational handle.
+	if entity.id == 0:
+		entity.id = _alloc_entity_id()
+	elif entity_id_registry.has(entity.id):
+		var existing_entity = entity_id_registry[entity.id]
+		if existing_entity != entity:
+			(
+				_worldLogger
+				.debug(
+					"ID collision detected, replacing entity: ",
+					existing_entity.name,
+					" with: ",
+					entity.name,
+				)
 			)
-		)
-		remove_entity(existing_entity)
+			remove_entity(existing_entity)
 
 	# Register this entity's ID
-	entity_id_registry[entity_id] = entity
+	entity_id_registry[entity.id] = entity
 
-	# Assign stable numeric entity ID for relationship slot key generation
-	if entity.ecs_id == 0:
-		_ensure_entity_ecs_id(entity)
+	# Register the optional semantic alias (singleton pattern: same alias replaces)
+	if entity.alias != &"":
+		var alias_holder = _entity_aliases.get(entity.alias)
+		if alias_holder != null and is_instance_valid(alias_holder) and alias_holder != entity:
+			(
+				_worldLogger
+				.debug(
+					"Alias collision detected, replacing entity: ",
+					alias_holder.name,
+					" with: ",
+					entity.name,
+				)
+			)
+			remove_entity(alias_holder)
+		_entity_aliases[entity.alias] = entity
 
 	# Stabilize target IDs before archetype key/signature generation so entities
 	# with pre-registered relationship targets don't get stale entity#0 slot keys.
 	for relationship in entity.relationships:
 		if relationship.target is Entity:
-			_ensure_entity_ecs_id(relationship.target)
-
-	# ID will auto-generate in _enter_tree if empty, or via property getter on first access
+			_ensure_entity_id(relationship.target)
 
 	# Update index
 	_worldLogger.debug("add_entity Adding Entity to World: ", entity)
@@ -420,7 +442,8 @@ func add_entity(entity: Entity, components = null, add_to_tree = true) -> void:
 	if add_to_tree and not entity.is_inside_tree():
 		get_node(entity_nodes_root).add_child(entity)
 
-	# add entity to our list
+	# add entity to our list (index tracked for O(1) swap-removal)
+	entity._entities_index = entities.size()
 	entities.append(entity)
 
 	# OPTIMIZATION: Suppress cache invalidation during entity initialization —
@@ -510,20 +533,32 @@ func remove_entity(entity: Entity) -> void:
 
 	entity_removed.emit(entity)
 	_worldLogger.debug("remove_entity Removing Entity: ", entity)
-	var erase_idx = entities.find(entity)
-	if erase_idx >= 0:
-		entities.remove_at(erase_idx)
+	# O(1) swap-removal from the entity list (order is NOT preserved)
+	var erase_idx: int = entity._entities_index
+	if erase_idx >= 0 and erase_idx < entities.size() and entities[erase_idx] == entity:
+		var last := entities.size() - 1
+		if erase_idx != last:
+			var moved: Entity = entities[last]
+			entities[erase_idx] = moved
+			moved._entities_index = erase_idx
+		entities.remove_at(last)
+		entity._entities_index = -1
 	else:
-		_worldLogger.warning("remove_entity: entity not found in entities array: ", entity)
+		# Fallback for entities with a stale/missing index (shouldn't happen)
+		var found_idx = entities.find(entity)
+		if found_idx >= 0:
+			entities.remove_at(found_idx)
+		else:
+			_worldLogger.warning("remove_entity: entity not found in entities array: ", entity)
 
-	# Remove from ID registry
-	var entity_id = entity.id
-	if (
-		entity_id != ""
-		and entity_id in entity_id_registry
-		and entity_id_registry[entity_id] == entity
-	):
-		entity_id_registry.erase(entity_id)
+	# Remove from ID registry and recycle locally-allocated handles
+	if entity.id != 0 and entity_id_registry.get(entity.id) == entity:
+		entity_id_registry.erase(entity.id)
+		_free_entity_id(entity.id)
+
+	# Remove from alias registry
+	if entity.alias != &"" and _entity_aliases.get(entity.alias) == entity:
+		_entity_aliases.erase(entity.alias)
 
 	# ARCHETYPE: Remove entity from archetype system (parallel)
 	_remove_entity_from_archetype(entity)
@@ -620,18 +655,44 @@ func enable_entity(entity: Entity, components = null) -> void:
 		assert(GECSEditorDebuggerMessages.entity_enabled(entity), "")
 
 
-## Find an entity by its persistent ID
-## [param id] The id to search for
+## Find an entity by its int handle id.
+## Stale handles (freed or recycled slots) return null — the registry never
+## contains them because a recycled slot carries a bumped generation.
+## [param id] The handle to search for
 ## [return] The Entity with matching ID, or null if not found
-func get_entity_by_id(id: String) -> Entity:
+func get_entity_by_id(id: int) -> Entity:
 	return entity_id_registry.get(id, null)
 
 
-## Check if an entity with the given ID exists in the world
-## [param id] The id to check
-## [return] true if an entity with this ID exists, false otherwise
-func has_entity_with_id(id: String) -> bool:
+## Check if an entity with the given handle id exists (i.e. the handle is live).
+func has_entity_with_id(id: int) -> bool:
 	return id in entity_id_registry
+
+
+## True when the handle refers to a live entity in this world.
+func is_alive(id: int) -> bool:
+	return id in entity_id_registry
+
+
+## Find an entity by its semantic alias (see [member Entity.alias]).
+func get_entity_by_alias(alias: StringName) -> Entity:
+	var entity = _entity_aliases.get(alias)
+	return entity if entity != null and is_instance_valid(entity) else null
+
+
+## Check if an entity is registered under the given alias.
+func has_entity_with_alias(alias: StringName) -> bool:
+	return get_entity_by_alias(alias) != null
+
+
+## Register (or re-point) a semantic alias for an entity at runtime.
+func register_alias(alias: StringName, entity: Entity) -> void:
+	_entity_aliases[alias] = entity
+
+
+## Remove a semantic alias.
+func unregister_alias(alias: StringName) -> void:
+	_entity_aliases.erase(alias)
 
 
 #region Systems
@@ -740,7 +801,9 @@ func purge(should_free = true, keep := []) -> void:
 	# Clear relationship indexes after purging entities
 	_relation_type_archetype_index.clear()
 	if keep.is_empty():
-		_next_entity_id = 1
+		# Reset the handle allocator — no live handles remain to alias against
+		_slot_generations = PackedInt64Array()
+		_free_slots.clear()
 	_worldLogger.debug("Cleared relationship indexes after purge")
 
 	# ARCHETYPE: Clear archetype system
@@ -2121,13 +2184,51 @@ func _invalidate_cache(reason: String) -> void:
 	_invalidate_cache_full(reason)
 
 
-func _ensure_entity_ecs_id(entity: Entity) -> int:
+## Allocate a fresh generational handle: low 32 bits = slot index + 1, high 32
+## bits = that slot's current generation. Recycled slots have a bumped generation
+## so a stale handle can never alias a new entity. The +1 bias keeps handle 0
+## reserved as the "unassigned" sentinel (slot 0 at generation 0 would otherwise
+## produce id == 0, breaking the `entity.id == 0` allocation check).
+func _alloc_entity_id() -> int:
+	var index: int
+	if _free_slots.is_empty():
+		index = _slot_generations.size()
+		_slot_generations.append(0)
+	else:
+		index = _free_slots.pop_back()
+	return (index + 1) | (_slot_generations[index] << 32)
+
+
+## Release a locally-allocated handle: bump the slot generation and recycle the
+## index. No-ops for foreign (pre-assigned) ids whose slot/generation don't match.
+func _free_entity_id(id: int) -> void:
+	var index := (id & 0xFFFFFFFF) - 1
+	if (
+		index >= 0
+		and index < _slot_generations.size()
+		and ((index + 1) | (_slot_generations[index] << 32)) == id
+	):
+		_slot_generations[index] += 1
+		_free_slots.append(index)
+
+
+## Reserve slot indices below [param base_index] so locally-allocated handles
+## never collide with an authority's (FLECS-style entity ranges). Call on
+## network clients before spawning local-only entities; replicated entities
+## keep the server-assigned id verbatim.
+func set_entity_range(base_index: int) -> void:
+	if _slot_generations.size() < base_index:
+		_slot_generations.resize(base_index)  # zero-filled; never enters _free_slots
+
+
+## Ensure an entity has an id, allocating a handle if needed. Used for
+## relationship targets referenced before they're added to the world.
+func _ensure_entity_id(entity: Entity) -> int:
 	if entity == null:
 		return 0
-	if entity.ecs_id == 0:
-		entity.ecs_id = _next_entity_id
-		_next_entity_id += 1
-	return entity.ecs_id
+	if entity.id == 0:
+		entity.id = _alloc_entity_id()
+	return entity.id
 
 
 func _get_relationship_relation_path(relationship: Relationship) -> String:
@@ -2237,11 +2338,11 @@ func _warn_structural_change_during_iteration(what: String, entity: Entity) -> v
 	)
 
 
-## Get the stable ecs_id of a relationship's target entity.
+## Get the stable handle id of a relationship's target entity.
 ## Returns 0 if target is not an Entity.
 func _get_relationship_target_id(relationship: Relationship) -> int:
 	if relationship.target is Entity:
-		return _ensure_entity_ecs_id(relationship.target)
+		return _ensure_entity_id(relationship.target)
 	return 0
 
 
@@ -2320,13 +2421,13 @@ func _on_entity_relationships_batch_removed(entity: Entity, _relationships: Arra
 ## REMOVE policy: Clean up relationships pointing TO a target entity being removed.
 ## Called inside remove_entity() before the target is freed.
 func _cleanup_relationships_to_target(target: Entity) -> void:
-	var target_ecs_id = target.ecs_id
-	if target_ecs_id == 0:
+	var target_id: int = target.id
+	if target_id == 0:
 		return
 
 	# Find all entities in archetypes that hold a slot key pointing to this target.
-	# Slot key format: "rel://relation_path::target_ecs_id"
-	var suffix = "::entity#" + str(target_ecs_id)
+	# Slot key format: "rel://relation_path::entity#<target id>"
+	var suffix = "::entity#" + str(target_id)
 	var source_entities: Array[Entity] = []
 
 	for rel_path in _relation_type_archetype_index.keys():
@@ -2424,7 +2525,7 @@ func _relationship_slot_key(rel: Relationship) -> String:
 func _relationship_slot_key_from_parts(rel_path: String, target: Variant) -> String:
 	var target_key: String
 	if target is Entity:
-		target_key = "entity#" + str(_ensure_entity_ecs_id(target))
+		target_key = "entity#" + str(_ensure_entity_id(target))
 	elif target is Component:
 		target_key = "comp://" + target.get_script().resource_path
 	elif target is Script:

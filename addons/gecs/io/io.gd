@@ -147,13 +147,19 @@ static func deserialize(gecs_filepath: String) -> Array[Entity]:
 ## This can be used so you can serialize entities to GECS Data and then Deserailize that [GecsSData] later
 static func deserialize_gecs_data(gecs_data: GecsData) -> Array[Entity]:
 	var entities: Array[Entity] = []
-	var id_to_entity: Dictionary = {}  # id -> Entity
+	# Load-time id → Entity mapping. Keys are Variant: int handles from v9+ saves
+	# and legacy String UUIDs from pre-v9 saves coexist during a single load, so
+	# relationship references resolve regardless of the save format.
+	var id_to_entity: Dictionary = {}
 
-	# Pass 1: Create all entities and build ID mapping
+	# Pass 1: Create all entities and build ID mapping keyed by the ORIGINAL
+	# saved id (the entity itself may get id = 0 under the legacy shim).
 	for entity_data in gecs_data.entities:
 		var entity = _deserialize_entity(entity_data)
 		entities.append(entity)
-		id_to_entity[entity.id] = entity
+		var saved_id = entity_data.id
+		if (saved_id is int and saved_id != 0) or (saved_id is String and saved_id != ""):
+			id_to_entity[saved_id] = entity
 
 	# Pass 2: Restore relationships using ID mapping
 	for i in entities.size():
@@ -207,6 +213,7 @@ static func _serialize_entity(
 			relationships,
 			auto_included,
 			entity.id,
+			String(entity.alias),
 		)
 	)
 
@@ -224,7 +231,7 @@ static func _load_from_path(file_path: String) -> Array[Entity]:
 	return deserialize_gecs_data(gecs_data)
 
 
-## Helper function to deserialize a single entity with its components and uuid
+## Helper function to deserialize a single entity with its components and identity
 static func _deserialize_entity(entity_data: GecsEntityData) -> Entity:
 	var entity: Entity
 
@@ -256,8 +263,18 @@ static func _deserialize_entity(entity_data: GecsEntityData) -> Entity:
 	# Set entity name
 	entity.name = entity_data.entity_name
 
-	# Restore id (important: set this directly)
-	entity.id = entity_data.id
+	# Restore identity:
+	# - v9+ saves store an int handle. Pre-assign it before World.add_entity so
+	#   the world keeps the foreign identity verbatim (resolve-by-id flow).
+	# - LEGACY SHIM: pre-v9 saves stored a String UUID. Leave id = 0 so the world
+	#   allocates a fresh handle; relationship references still resolve through
+	#   the load-time old-id → entity mapping built in deserialize_gecs_data.
+	if entity_data.id is int:
+		entity.id = entity_data.id
+
+	# Restore the optional semantic alias (absent/empty in older saves)
+	if entity_data.alias != "":
+		entity.alias = StringName(entity_data.alias)
 
 	# Add components (they're already properly typed as Component resources)
 	for component in entity_data.components:

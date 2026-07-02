@@ -98,7 +98,7 @@ func test_roundtrip_null_target():
 func test_serialize_entity_target():
 	var entity = Entity.new()
 	entity.name = "TargetEntity"
-	entity.id = "target-123"
+	entity.id = 123
 	world.add_entity(entity)
 
 	var rel = Relationship.new(C_TestA.new(), entity)
@@ -106,13 +106,13 @@ func test_serialize_entity_target():
 
 	assert_dict(recipe).is_not_empty()
 	assert_str(recipe["tt"]).is_equal("E")
-	assert_str(recipe["t"]).is_equal("target-123")
+	assert_int(recipe["t"]).is_equal(123)
 
 
 func test_roundtrip_entity_target():
 	var entity = Entity.new()
 	entity.name = "TargetEntity"
-	entity.id = "target-123"
+	entity.id = 123
 	world.add_entity(entity)
 
 	var rel = Relationship.new(C_TestA.new(), entity)
@@ -122,7 +122,7 @@ func test_roundtrip_entity_target():
 	assert_object(restored).is_not_null()
 	assert_object(restored.target).is_not_null()
 	assert_object(restored.target).is_instanceof(Entity)
-	assert_str((restored.target as Entity).id).is_equal("target-123")
+	assert_int((restored.target as Entity).id).is_equal(123)
 
 
 func test_roundtrip_component_target():
@@ -170,12 +170,12 @@ func test_serialize_returns_empty_for_null_relation():
 func test_serialize_entity_relationships():
 	var source = Entity.new()
 	source.name = "Source"
-	source.id = "source-1"
+	source.id = 9001
 	world.add_entity(source)
 
 	var target = Entity.new()
 	target.name = "Target"
-	target.id = "target-1"
+	target.id = 9002
 	world.add_entity(target)
 
 	source.add_relationship(Relationship.new(C_TestA.new(), target))
@@ -186,7 +186,7 @@ func test_serialize_entity_relationships():
 
 	# Check first recipe (C_TestA -> Entity target)
 	assert_str(recipes[0]["tt"]).is_equal("E")
-	assert_str(recipes[0]["t"]).is_equal("target-1")
+	assert_int(recipes[0]["t"]).is_equal(9002)
 
 	# Check second recipe (C_TestB -> null)
 	assert_str(recipes[1]["tt"]).is_equal("N")
@@ -195,16 +195,16 @@ func test_serialize_entity_relationships():
 func test_apply_entity_relationships():
 	var source = Entity.new()
 	source.name = "Source"
-	source.id = "source-1"
+	source.id = 9001
 	world.add_entity(source)
 
 	var target = Entity.new()
 	target.name = "Target"
-	target.id = "target-1"
+	target.id = 9002
 	world.add_entity(target)
 
 	var recipes: Array = [
-		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": "target-1"},
+		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": 9002},
 		{"r": "res://addons/gecs/tests/components/c_test_b.gd", "tt": "N", "t": ""},
 	]
 
@@ -221,12 +221,12 @@ func test_apply_entity_relationships():
 func test_deferred_resolution_entity_target():
 	var source = Entity.new()
 	source.name = "Source"
-	source.id = "source-1"
+	source.id = 9001
 	world.add_entity(source)
 
 	# Apply a recipe referencing an entity that doesn't exist yet
 	var recipes: Array = [
-		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": "future-entity"},
+		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": 9003},
 	]
 
 	handler.apply_entity_relationships(source, recipes)
@@ -235,12 +235,12 @@ func test_deferred_resolution_entity_target():
 	assert_int(source.relationships.size()).is_equal(0)
 
 	# Pending should have the queued recipe
-	assert_bool(handler._pending_relationships.has("source-1")).is_true()
+	assert_bool(handler._pending_relationships.has(9001)).is_true()
 
 	# Now add the target entity to the world
 	var target = Entity.new()
 	target.name = "FutureTarget"
-	target.id = "future-entity"
+	target.id = 9003
 	world.add_entity(target)
 
 	# Trigger deferred resolution (normally called by NetworkSync._on_entity_added)
@@ -251,31 +251,31 @@ func test_deferred_resolution_entity_target():
 	assert_object(source.relationships[0].target).is_same(target)
 
 	# Pending should be cleared
-	assert_bool(handler._pending_relationships.has("source-1")).is_false()
+	assert_bool(handler._pending_relationships.has(9001)).is_false()
 
 
 func test_deferred_resolution_ignores_unrelated_entities():
 	var source = Entity.new()
 	source.name = "Source"
-	source.id = "source-1"
+	source.id = 9001
 	world.add_entity(source)
 
 	# Queue a pending recipe for "future-entity"
 	var recipes: Array = [
-		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": "future-entity"},
+		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": 9003},
 	]
 	handler.apply_entity_relationships(source, recipes)
 
 	# Add a different entity
 	var unrelated = Entity.new()
 	unrelated.name = "Unrelated"
-	unrelated.id = "unrelated-entity"
+	unrelated.id = 9004
 	world.add_entity(unrelated)
 	handler.try_resolve_pending(unrelated)
 
 	# Should still be pending
 	assert_int(source.relationships.size()).is_equal(0)
-	assert_bool(handler._pending_relationships.has("source-1")).is_true()
+	assert_bool(handler._pending_relationships.has(9001)).is_true()
 
 
 # ============================================================================
@@ -288,7 +288,7 @@ func test_sync_loop_prevention_applying_flag():
 
 	var entity = Entity.new()
 	entity.name = "TestEntity"
-	entity.id = "test-1"
+	entity.id = 9005
 	entity.add_component(CN_NetworkIdentity.new(0))
 	world.add_entity(entity)
 
@@ -306,7 +306,7 @@ func test_sync_loop_prevention_network_data_flag():
 
 	var entity = Entity.new()
 	entity.name = "TestEntity"
-	entity.id = "test-1"
+	entity.id = 9005
 	entity.add_component(CN_NetworkIdentity.new(0))
 	world.add_entity(entity)
 
@@ -327,11 +327,11 @@ func test_sync_loop_prevention_network_data_flag():
 func test_reset_clears_pending():
 	var source = Entity.new()
 	source.name = "Source"
-	source.id = "source-1"
+	source.id = 9001
 	world.add_entity(source)
 
 	var recipes: Array = [
-		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": "missing-entity"},
+		{"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": 999999},
 	]
 	handler.apply_entity_relationships(source, recipes)
 
@@ -368,7 +368,7 @@ func test_deserialize_unknown_target_type():
 
 func test_deserialize_entity_target_not_found():
 	var recipe = {
-		"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": "nonexistent"
+		"r": "res://addons/gecs/tests/components/c_test_a.gd", "tt": "E", "t": 999998
 	}
 	var result = handler.deserialize_relationship(recipe)
 	assert_object(result).is_null()

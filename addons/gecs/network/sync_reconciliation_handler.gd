@@ -73,15 +73,15 @@ func handle_sync_full_state(payload: Dictionary) -> void:
 
 	var server_entities: Array = payload.get("entities", [])
 
-	# Build set of known server entity IDs for ghost detection
+	# Build set of known server entity IDs (int handles) for ghost detection
 	var server_ids: Dictionary = {}
 	for entity_data in server_entities:
-		server_ids[entity_data.get("id", "")] = true
+		server_ids[entity_data.get("id", 0)] = true
 
 	# Apply component data for known entities; skip local (own) entities
 	var my_peer_id: int = _ns.net_adapter.get_my_peer_id()
 	for entity_data in server_entities:
-		var entity_id: String = entity_data.get("id", "")
+		var entity_id: int = entity_data.get("id", 0)
 		var entity = _ns._world.entity_id_registry.get(entity_id)
 		if entity == null:
 			continue  # Entity not yet spawned; spawn path handles this

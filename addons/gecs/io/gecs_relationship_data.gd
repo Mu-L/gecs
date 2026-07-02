@@ -13,8 +13,11 @@ extends Resource
 ## Valid values: "Entity", "Component", "Script"
 @export var target_type: String = ""
 
-## The id of the target entity (used when target_type is "Entity")
-@export var target_entity_id: String = ""
+## The id of the target entity (used when target_type is "Entity").
+## v9+ saves store the int [member Entity.id] handle. Legacy (pre-v9) saves
+## stored a String UUID — @export_storage keeps this untyped so both load
+## verbatim and resolve through the load-time id → entity mapping.
+@export_storage var target_entity_id = 0
 
 ## The target component data (used when target_type is "Component")
 @export var target_component_data: Component
@@ -27,7 +30,7 @@ extends Resource
 func _init(
 	_relation_data: Component = null,
 	_target_type: String = "",
-	_target_entity_id: String = "",
+	_target_entity_id: int = 0,
 	_target_component_data: Component = null,
 	_target_script_path: String = "",
 ):
@@ -83,11 +86,16 @@ func to_relationship(entity_mapping: Dictionary = {}) -> Relationship:
 		"null":
 			relationship.target = null
 		"Entity":
+			# entity_mapping is keyed by the ORIGINAL saved id — int handles from
+			# v9+ saves and legacy String UUIDs coexist during a single load.
 			if target_entity_id in entity_mapping:
 				relationship.target = entity_mapping[target_entity_id]
 			else:
 				push_warning(
-					"GecsRelationshipData: Could not resolve entity with ID: " + target_entity_id
+					(
+						"GecsRelationshipData: Could not resolve entity with ID: "
+						+ str(target_entity_id)
+					)
 				)
 				return null
 		"Component":

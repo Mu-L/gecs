@@ -306,7 +306,7 @@ func test_backward_compatibility_no_relationships():
 	var des_entity = deserialized_entities[0]
 	assert_that(des_entity.name).is_equal("NoRelationshipEntity")
 	assert_that(des_entity.relationships).has_size(0)
-	assert_that(des_entity.id).is_not_equal("")
+	assert_that(des_entity.id).is_not_equal(0)
 
 	# Cleanup
 	auto_free(des_entity)

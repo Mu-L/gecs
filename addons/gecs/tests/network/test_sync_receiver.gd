@@ -36,7 +36,7 @@ class MockSender:
 
 	var relay_calls: Array = []
 
-	func queue_relay_data(entity_id: String, comp_data: Dictionary) -> void:
+	func queue_relay_data(entity_id: int, comp_data: Dictionary) -> void:
 		relay_calls.append({"entity_id": entity_id, "comp_data": comp_data})
 
 
@@ -209,7 +209,7 @@ func test_server_relays_to_clients():
 	# Relay must have been queued
 	assert_int(mock_ns._sender.relay_calls.size()).is_greater(0)
 	var relay = mock_ns._sender.relay_calls[0]
-	assert_str(relay["entity_id"]).is_equal(entity.id)
+	assert_int(relay["entity_id"]).is_equal(entity.id)
 
 
 # ============================================================================

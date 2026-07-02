@@ -48,9 +48,12 @@ signal relationships_batch_removed(entity: Entity, _relationships: Array)
 #endregion Signals
 
 #region Exported Variables
-## The id of the entity either UUID or custom string.
-## This must be unique within a [World]. If left blank, a UUID will be generated when the entity is added to a world.
-@export var id: String
+## Optional human-readable name for this entity, unique within a [World].
+## Registered in the world's alias registry at add time — look up with
+## [method World.get_entity_by_alias]. An alias is a NAME, not an identity:
+## the entity's identity is the int handle [member id].
+## (Replaces the v8 pattern of assigning semantic strings to `id`.)
+@export var alias: StringName = &""
 ## Is this entity active? (Will show up in queries)
 @export var enabled: bool = true:
 	set(value):
@@ -91,10 +94,15 @@ var _entityLogger = GECSLogger.new().domain("Entity")
 ## We can store ephemeral state on the entity
 var _state = {}
 
-## Stable integer ID assigned by World during registration.
-## Used for deterministic relationship slot key generation (not the same as the string UUID `id`).
-## Value is 0 until the entity is registered with a World.
-var ecs_id: int = 0
+## THE entity identity: a 64-bit generational handle assigned by the World —
+## low 32 bits = slot index, high 32 bits = generation (bumped when a slot is
+## recycled, so stale handles are detected in O(1) via [method World.is_alive]).
+## 0 until registered with a World. Replaces BOTH the v8 String UUID `id` and
+## the sequential `ecs_id`: relationship pair keys, serialization, and network
+## replication all use this single int. Pre-assign a nonzero value before
+## [method World.add_entity] (deserialization / network spawn) to keep a
+## foreign identity — the world registers it verbatim instead of allocating.
+var id: int = 0
 
 ## The [World] currently tracking this entity (set by World.add_entity/enable_entity,
 ## cleared by remove_entity/disable_entity). Structural mutations notify it via
@@ -102,6 +110,10 @@ var ecs_id: int = 0
 ## for user code, but the world is no longer a signal subscriber (a signal emit
 ## costs ~3x a direct call, and connect/disconnect per entity lifecycle is gone).
 var _world: World = null
+
+## Position in World.entities — maintained by the world for O(1) swap-removal.
+## -1 while not in a world's entity list.
+var _entities_index: int = -1
 
 #endregion Public Variables
 

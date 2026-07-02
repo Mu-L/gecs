@@ -242,18 +242,18 @@ func test_complex_nested_relationships_serialization():
 
 
 func test_relationship_replacement_with_id_collision():
-	# Test that when entities with relationships are replaced via UUID collision,
+	# Test that when entities with relationships are replaced via id collision,
 	# the relationships update correctly to point to the new entities
-	# 1. Create initial setup: Player -> Weapon
+	# 1. Create initial setup: Player -> Weapon (pre-assigned int handles)
 	var player = Entity.new()
 	player.name = "Player"
 	player.add_component(C_TestA.new())
-	player.set("id", "player-id-123")
+	player.id = 9123
 
 	var old_weapon = Entity.new()
 	old_weapon.name = "OldWeapon"
 	old_weapon.add_component(C_TestB.new())
-	old_weapon.set("id", "weapon-id-456")
+	old_weapon.id = 9456
 
 	var player_weapon_rel = Relationship.new(C_TestA.new(), old_weapon)
 	player.add_relationship(player_weapon_rel)
@@ -272,19 +272,19 @@ func test_relationship_replacement_with_id_collision():
 	var file_path = "res://reports/test_replacement_relationships.tres"
 	ECS.save(serialized_data, file_path)
 
-	# 3. Create "updated" entities with same UUIDs but different data
+	# 3. Create "updated" entities with same ids but different data
 	var new_weapon = Entity.new()
 	new_weapon.name = "NewUpgradedWeapon"
 	new_weapon.add_component(C_TestB.new())
 	new_weapon.add_component(C_TestC.new())  # Added component
-	new_weapon.set("id", "weapon-id-456")  # Same UUID!
+	new_weapon.id = 9456  # Same id!
 
 	# 4. Add new weapon (should replace old weapon)
 	world.add_entity(new_weapon, null, false)
 
 	# Verify replacement occurred
 	assert_that(world.entities).has_size(2)  # Still only 2 entities
-	var current_weapon = world.get_entity_by_id("weapon-id-456")
+	var current_weapon = world.get_entity_by_id(9456)
 	assert_that(current_weapon).is_equal(new_weapon)
 	assert_that(current_weapon.name).is_equal("NewUpgradedWeapon")
 	assert_that(current_weapon.has_component(C_TestC)).is_true()
@@ -301,12 +301,12 @@ func test_relationship_replacement_with_id_collision():
 		world.add_entity(entity, null, false)  # Should trigger replacements
 
 	# Verify entities were replaced with old state
-	var final_weapon = world.get_entity_by_id("weapon-id-456")
+	var final_weapon = world.get_entity_by_id(9456)
 	print("Final weapon name: ", final_weapon.name)
 	assert_that(final_weapon.has_component(C_TestC)).is_false()  # Lost the added component
 
 	# Verify relationship points to restored weapon
-	var final_player = world.get_entity_by_id("player-id-123")
+	var final_player = world.get_entity_by_id(9123)
 	assert_that(final_player.relationships).has_size(1)
 	assert_that(final_player.relationships[0].target).is_equal(final_weapon)
 	print("Final relationship target name: ", final_player.relationships[0].target.name)
