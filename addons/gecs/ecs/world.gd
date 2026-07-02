@@ -82,14 +82,13 @@ var archetypes: Dictionary = {}  # int -> Archetype
 ## Fast lookup: Entity -> its current Archetype
 var entity_to_archetype: Dictionary = {}  # Entity -> Archetype
 ## The [QueryBuilder] instance for this world used to build and execute queries.
-## Anytime we request a query we want to connect the cache invalidated signal to the query
-## so that all queries are invalidated anytime we emit cache_invalidated.
+## Builders detect stale cached results by comparing [member cache_version] at
+## execute() time, so no signal connection is made here. (Connecting each vended
+## builder to [signal cache_invalidated] would strongly retain every builder ever
+## created and fan every structural change out to all of them.)
 var query: QueryBuilder:
 	get:
-		var q: QueryBuilder = QueryBuilder.new(self)
-		if not cache_invalidated.is_connected(q.invalidate_cache):
-			cache_invalidated.connect(q.invalidate_cache)
-		return q
+		return QueryBuilder.new(self)
 ## Incrementing counter for stable entity IDs (assigned in add_entity)
 var _next_entity_id: int = 1
 
@@ -98,17 +97,30 @@ var _next_entity_id: int = 1
 var _relation_type_archetype_index: Dictionary = {}  # String -> Dictionary[int, Archetype]
 ## Logger for the world to only log to a specific domain
 var _worldLogger = GECSLogger.new().domain("World")
-## Cache for commonly used query results - stores matching archetypes, not entities
-## This dramatically reduces cache invalidation since archetypes are stable
+## Cache for commonly used query results - stores matching archetypes, not entities.
+## Maintained INCREMENTALLY: entity moves between existing archetypes never touch it;
+## archetype creation appends to matching entries (_register_new_archetype) and
+## archetype deletion erases from them (_delete_archetype). Only purge()/compact()
+## clear it wholesale.
 var _query_archetype_cache: Dictionary = {}  # query_sig -> Array[Archetype]
+## Match terms stored per cached query so new archetypes can be tested against
+## cached queries at creation time. Same key space as _query_archetype_cache.
+## Value: [all_ids, any_ids, exclude_ids, rel_slot_keys, ex_rel_slot_keys,
+##         wildcard_rel_types, wildcard_ex_rel_types]
+var _query_cache_terms: Dictionary = {}
 ## Track cache hits for performance monitoring
 var _cache_hits: int = 0
 var _cache_misses: int = 0
 ## Track cache invalidations for debugging
 var _cache_invalidation_count: int = 0
-## Monotonic version counter — incremented on every structural cache invalidation.
-## QueryBuilder checks this to detect stale cached results without relying on signal delivery.
+## Monotonic membership version — incremented whenever any entity's archetype
+## membership changes (component/relationship add/remove, entity add/remove,
+## enabled flips). QueryBuilder compares this to detect stale cached execute()
+## results without relying on signal delivery.
 var cache_version: int = 0
+## Monotonic archetype-set version — incremented only when an archetype is
+## created or deleted. Diagnostic counter for the incremental cache maintenance.
+var archetype_set_version: int = 0
 var _cache_invalidation_reasons: Dictionary = {}  # reason -> count
 ## Global cache: script_instance_id (int) -> Script (loaded once, reused forever)
 var _component_script_cache: Dictionary = {}  # int -> Script
@@ -776,7 +788,7 @@ func purge(should_free = true, keep := []) -> void:
 	for observer in observers.duplicate():
 		remove_observer(observer)
 
-	_invalidate_cache("purge")
+	_invalidate_cache_full("purge")
 
 	# remove itself
 	if should_free:
@@ -834,9 +846,9 @@ func _on_entity_component_added(entity: Entity, component: Resource) -> void:
 			comp_key,
 			true,
 		)
-		# Always invalidate: even if no new archetype was created, entity membership
-		# within archetypes changed, so cached query results are stale.
-		_invalidate_cache("entity_component_added")
+		# Membership changed — bump so cached execute() results know they're stale.
+		# The query→archetype cache itself stays valid (maintained incrementally).
+		_bump_membership("entity_component_added")
 
 	# Emit Signal
 	component_added.emit(entity, component)
@@ -902,9 +914,8 @@ func _on_entity_component_removed(entity, component: Resource) -> void:
 			comp_key,
 			false,
 		)
-		# Always invalidate: even if no new archetype was created, entity membership
-		# within archetypes changed, so cached query results are stale.
-		_invalidate_cache("entity_component_removed")
+		# Membership changed — bump so cached execute() results know they're stale.
+		_bump_membership("entity_component_removed")
 
 	component_removed.emit(entity, component)
 	_handle_observer_component_removed(entity, component)
@@ -924,7 +935,7 @@ func _on_entity_relationship_added(entity: Entity, relationship: Relationship) -
 			var slot_key = _relationship_slot_key(relationship)
 			if slot_key != "":
 				_move_entity_to_new_archetype_fast(entity, old_archetype, slot_key, true)
-			_invalidate_cache("entity_relationship_added")
+			_bump_membership("entity_relationship_added")
 
 	relationship_added.emit(entity, relationship)
 	_dispatch_observer_event(Observer.Event.RELATIONSHIP_ADDED, entity, relationship)
@@ -951,7 +962,7 @@ func _on_entity_relationship_removed(entity: Entity, relationship: Relationship)
 			var slot_key = _relationship_slot_key(relationship)
 			if slot_key != "":
 				_move_entity_to_new_archetype_fast(entity, old_archetype, slot_key, false)
-			_invalidate_cache("entity_relationship_removed")
+			_bump_membership("entity_relationship_removed")
 
 	relationship_removed.emit(entity, relationship)
 	if ECS.debug:
@@ -1843,8 +1854,18 @@ func _query(
 					):
 						continue
 				matching_archetypes.append(archetype)
-		# Cache the matching archetypes (not the entity arrays!)
+		# Cache the matching archetypes (not the entity arrays!) plus the match
+		# terms so _register_new_archetype can maintain this entry incrementally.
 		_query_archetype_cache[cache_key] = matching_archetypes
+		_query_cache_terms[cache_key] = [
+			_all,
+			_any,
+			_exclude,
+			rel_slot_keys.duplicate(),
+			ex_rel_slot_keys.duplicate(),
+			wildcard_rel_types.duplicate(),
+			wildcard_ex_rel_types.duplicate(),
+		]
 		if ECS.debug:
 			perf_mark(
 				"query_archetype_scan",
@@ -1992,6 +2013,15 @@ func get_matching_archetypes(query_builder: QueryBuilder) -> Array[Archetype]:
 		)
 
 	_query_archetype_cache[cache_key] = matching
+	_query_cache_terms[cache_key] = [
+		_all,
+		_any,
+		_exclude,
+		rel_slot_keys.duplicate(),
+		ex_rel_slot_keys.duplicate(),
+		wildcard_rel_types.duplicate(),
+		wildcard_ex_rel_types.duplicate(),
+	]
 	if ECS.debug:
 		perf_mark(
 			"archetypes_total",
@@ -2024,26 +2054,46 @@ func reset_cache_stats() -> void:
 	_cache_invalidation_reasons.clear()
 
 
-## Internal helper to track cache invalidations (debug mode only)
-## KNOWN ISSUE: During suppression, observer queries (via _handle_observer_component_added)
-## may hit stale archetype cache entries if new archetypes are created mid-batch.
-## This can occur when: (1) observers are registered, (2) add_entities() batches entities
-## with different component compositions, and (3) a new archetype created mid-batch
-## matches an observer's match() query that was already cached from an earlier entity.
-## Clearing the cache here would fix it but defeats suppression (N*M clears vs 1).
-func _invalidate_cache(reason: String) -> void:
-	# OPTIMIZATION: Skip invalidation during batch operations; mark pending for deferred fire
+## Membership bump — the CHEAP invalidation tier, fired on every structural change.
+## Records that entity↔archetype membership changed so QueryBuilder entity-array
+## caches (execute() results) detect staleness via [member cache_version].
+## Does NOT clear _query_archetype_cache: an entity moving between EXISTING
+## archetypes can never change which archetypes match a query — only archetype
+## creation/deletion can, and those maintain the cache incrementally
+## (_register_new_archetype / _delete_archetype).
+## Still emits [signal cache_invalidated] for external listeners (a no-listener
+## emit is ~free now that world.query no longer auto-connects every builder).
+func _bump_membership(reason: String) -> void:
+	# Coalesce during batch operations; _end_suppress fires one bump at the end.
 	if _suppress_invalidation_depth > 0:
 		_pending_invalidation = true
 		return
 
 	_pending_invalidation = false
-	_query_archetype_cache.clear()
 	cache_version += 1
 	cache_invalidated.emit()
 
 	_cache_invalidation_count += 1
 	_cache_invalidation_reasons[reason] = _cache_invalidation_reasons.get(reason, 0) + 1
+
+
+## Full invalidation — the RARE tier. Clears the query→archetype cache wholesale.
+## Only for events that rebuild the archetype set entirely (purge, compact).
+func _invalidate_cache_full(reason: String) -> void:
+	_pending_invalidation = false
+	_query_archetype_cache.clear()
+	_query_cache_terms.clear()
+	cache_version += 1
+	archetype_set_version += 1
+	cache_invalidated.emit()
+
+	_cache_invalidation_count += 1
+	_cache_invalidation_reasons[reason] = _cache_invalidation_reasons.get(reason, 0) + 1
+
+
+## Deprecated alias kept for external callers — full clear.
+func _invalidate_cache(reason: String) -> void:
+	_invalidate_cache_full(reason)
 
 
 func _ensure_entity_ecs_id(entity: Entity) -> int:
@@ -2069,11 +2119,11 @@ func _begin_suppress() -> void:
 	_suppress_invalidation_depth += 1
 
 
-## End a batch suppression window — decrements depth counter and fires deferred invalidation if pending.
+## End a batch suppression window — decrements depth counter and fires the deferred membership bump if pending.
 func _end_suppress() -> void:
 	_suppress_invalidation_depth -= 1
 	if _suppress_invalidation_depth == 0 and _pending_invalidation:
-		_invalidate_cache("deferred_pending")
+		_bump_membership("deferred_pending")
 
 
 ## Get the stable ecs_id of a relationship's target entity.
@@ -2107,7 +2157,7 @@ func _on_entity_relationships_batch_added(entity: Entity, _relationships: Array)
 	# If entity moved to an existing archetype, _end_suppress may not have
 	# triggered invalidation (no new archetype → no _pending_invalidation).
 	if moved:
-		_invalidate_cache("batch_relationship_added")
+		_bump_membership("batch_relationship_added")
 
 	# Emit per-relationship signals on the entity so external listeners
 	# (e.g. network_sync) see each change. Guard prevents our own single
@@ -2142,7 +2192,7 @@ func _on_entity_relationships_batch_removed(entity: Entity, _relationships: Arra
 
 	_end_suppress()
 	if moved:
-		_invalidate_cache("batch_relationship_removed")
+		_bump_membership("batch_relationship_removed")
 
 	# Emit per-relationship signals on the entity so external listeners
 	# (e.g. network_sync) see each change.
@@ -2341,11 +2391,80 @@ func _get_or_create_archetype(signature: int, component_types: Array) -> Archety
 					_relation_type_archetype_index[rel_path] = {}
 				_relation_type_archetype_index[rel_path][archetype.signature] = archetype
 
-		# ARCHETYPE OPTIMIZATION: Only invalidate cache when NEW archetype is created
-		# This is rare compared to entities moving between existing archetypes
-		_invalidate_cache("new_archetype_created")
+		# Incrementally maintain cached queries with the new archetype (must run
+		# AFTER wildcard-index registration — term matching consults the index).
+		_register_new_archetype(archetype)
 
 	return archetypes[signature]
+
+
+## Incrementally maintain the query→archetype cache when a new archetype appears:
+## append it to every cached query whose stored terms it matches. This keeps
+## cached queries permanently valid without wholesale invalidation — and it runs
+## even inside suppression windows, so mid-batch queries (e.g. observer matching
+## during add_entities) see new archetypes immediately.
+func _register_new_archetype(archetype: Archetype) -> void:
+	archetype_set_version += 1
+	var desynced_keys: Array = []
+	for cache_key in _query_archetype_cache:
+		var terms = _query_cache_terms.get(cache_key)
+		if terms == null:
+			# Cache entry without stored terms can't be maintained — drop it so it re-misses.
+			desynced_keys.append(cache_key)
+			continue
+		if _archetype_matches_terms(archetype, terms):
+			# Copy-on-write: systems may be iterating the cached array THIS frame
+			# (direct-mutation style). Appending in place would make their loop
+			# visit the new archetype and double-process entities that just moved
+			# into it. Swap in a fresh array instead — in-flight holders keep a
+			# stable snapshot; the next archetypes() call sees the update.
+			var updated: Array[Archetype] = _query_archetype_cache[cache_key].duplicate()
+			updated.append(archetype)
+			_query_archetype_cache[cache_key] = updated
+	for k in desynced_keys:
+		_query_archetype_cache.erase(k)
+		_query_cache_terms.erase(k)
+	_bump_membership("new_archetype_created")
+
+
+## Test an archetype against stored query terms — the same predicate as the
+## cache-miss scan in _query()/get_matching_archetypes().
+## terms: [all_ids, any_ids, exclude_ids, rel_slot_keys, ex_rel_slot_keys,
+##         wildcard_rel_types, wildcard_ex_rel_types]
+func _archetype_matches_terms(archetype: Archetype, terms: Array) -> bool:
+	if not archetype.matches_query(terms[0], terms[1], terms[2]):
+		return false
+	var wildcard_rel_types: Array = terms[5]
+	if (
+		not wildcard_rel_types.is_empty()
+		and not _archetype_has_all_relation_types(archetype, wildcard_rel_types)
+	):
+		return false
+	var rel_slot_keys: Array = terms[3]
+	var ex_rel_slot_keys: Array = terms[4]
+	var wildcard_ex_rel_types: Array = terms[6]
+	if (
+		not rel_slot_keys.is_empty()
+		or not ex_rel_slot_keys.is_empty()
+		or not wildcard_ex_rel_types.is_empty()
+	):
+		if not archetype.matches_relationship_query(rel_slot_keys, ex_rel_slot_keys):
+			return false
+		if (
+			not wildcard_ex_rel_types.is_empty()
+			and _archetype_has_any_relation_type(archetype, wildcard_ex_rel_types)
+		):
+			return false
+	return true
+
+
+## Check if archetype has ALL of the specified relation types (wildcard match)
+func _archetype_has_all_relation_types(archetype: Archetype, rel_types: Array) -> bool:
+	for rel_path in rel_types:
+		var type_archetypes = _relation_type_archetype_index.get(rel_path)
+		if type_archetypes == null or not type_archetypes.has(archetype.signature):
+			return false
+	return true
 
 
 ## Add entity to appropriate archetype (parallel system)
@@ -2378,13 +2497,12 @@ func _remove_entity_from_archetype(entity: Entity) -> bool:
 	var removed = archetype.remove_entity(entity)
 	entity_to_archetype.erase(entity)
 
-	# Must invalidate: QueryBuilder caches execute() results
-	_invalidate_cache("entity_removed_from_archetype")
+	# Membership changed — QueryBuilder execute() caches must know they're stale
+	_bump_membership("entity_removed_from_archetype")
 
 	# Clean up empty archetypes (optional - can keep them for reuse)
 	if archetype.is_empty():
 		_delete_archetype(archetype)
-		_invalidate_cache("empty_archetype_removed")
 
 	return removed
 
@@ -2422,6 +2540,18 @@ func _delete_archetype(archetype: Archetype) -> void:
 		target.neighbors.erase(my_id)
 	for target in archetype.remove_edges.values():
 		target.neighbors.erase(my_id)
+
+	# Incrementally remove from cached query results (deletion is rare, erase is
+	# O(n)). Copy-on-write for the same reason as _register_new_archetype: an
+	# in-place erase would shift elements under an in-flight iteration.
+	for cache_key in _query_archetype_cache:
+		var cached: Array[Archetype] = _query_archetype_cache[cache_key]
+		var idx := cached.find(archetype)
+		if idx != -1:
+			var updated: Array[Archetype] = cached.duplicate()
+			updated.remove_at(idx)
+			_query_archetype_cache[cache_key] = updated
+	archetype_set_version += 1
 
 	# Clear own state and remove from world
 	archetype.add_edges.clear()

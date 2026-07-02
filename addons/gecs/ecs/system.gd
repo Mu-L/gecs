@@ -79,7 +79,7 @@ enum FlushMode { PER_SYSTEM, PER_GROUP, MANUAL }
 @export var safe_iteration: bool = true
 
 @export_group("Profiling")
-## When true, registers a custom entry under [code]gecs/systems/<name>[/code]
+## When true, registers a custom entry named [code]<script_name> - [GECS][/code]
 ## in Godot's built-in Debugger → Monitors panel, graphing this system's
 ## current-frame execution time in [b]milliseconds[/b] with decimals — same
 ## formatting as Godot's built-in [code]Process[/code] / [code]Physics Process[/code]

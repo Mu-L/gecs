@@ -39,7 +39,7 @@ func test_flag_on_registers_monitor_and_returns_last_exec_time():
 	world.add_system(s)
 	# Monitor is registered as soon as the system enters the tree + setup runs
 	var id = _monitor_id_for(s)
-	assert_str(String(id)).is_equal("gecs/systems/s_noop")
+	assert_str(String(id)).is_equal("s_noop - [GECS]")
 	assert_bool(Performance.has_custom_monitor(id)).is_true()
 	# After one frame the callable should return current-frame time in seconds
 	# (Godot's MONITOR_TYPE_TIME formatter converts to ms for display).
@@ -142,7 +142,7 @@ func test_duplicate_script_gets_unique_suffix():
 	world.add_system(b)
 	var id_a = _monitor_id_for(a)
 	var id_b = _monitor_id_for(b)
-	assert_str(String(id_a)).is_equal("gecs/systems/s_noop")
-	assert_str(String(id_b)).is_equal("gecs/systems/s_noop#2")
+	assert_str(String(id_a)).is_equal("s_noop - [GECS]")
+	assert_str(String(id_b)).is_equal("s_noop#2 - [GECS]")
 	assert_bool(Performance.has_custom_monitor(id_a)).is_true()
 	assert_bool(Performance.has_custom_monitor(id_b)).is_true()

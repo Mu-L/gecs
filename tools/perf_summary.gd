@@ -138,7 +138,7 @@ func _render(current: Dictionary, baseline: Dictionary, baseline_dir: String) ->
 			if baseline.has(test_name) and baseline[test_name].has(scale):
 				var base_ms: float = baseline[test_name][scale]["ms"]
 				if base_ms > 0.0:
-					var delta := (cell_data["ms"] - base_ms) / base_ms * 100.0
+					var delta: float = (cell_data["ms"] - base_ms) / base_ms * 100.0
 					cell += " (%+.0f%%)" % delta
 			row += " %s |" % cell
 		lines.append(row)
@@ -149,5 +149,5 @@ func _render(current: Dictionary, baseline: Dictionary, baseline_dir: String) ->
 
 func _fmt_scale(scale: int) -> String:
 	if scale >= 1000 and scale % 1000 == 0:
-		return "%dk" % (scale / 1000)
+		return "%dk" % int(scale / 1000.0)
 	return str(scale)
