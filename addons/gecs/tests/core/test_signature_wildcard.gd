@@ -195,26 +195,26 @@ func test_wildcard_index_cleaned_on_archetype_deletion():
 
 
 ## Test 9 (stable entity ID): An entity registered in a World receives a unique
-## integer ecs_id (> 0). Two different entities get different values.
+## nonzero int handle id. Two different entities get different values.
 func test_stable_entity_id_assigned():
 	var entity_a = Entity.new()
 	var entity_b = Entity.new()
 
-	# Before registration, ecs_id should be 0
-	assert_int(entity_a.ecs_id).is_equal(0)
-	assert_int(entity_b.ecs_id).is_equal(0)
+	# Before registration, id should be the 0 sentinel
+	assert_int(entity_a.id).is_equal(0)
+	assert_int(entity_b.id).is_equal(0)
 
 	world.add_entity(entity_a)
 	world.add_entity(entity_b)
 
-	# After registration, should have unique positive IDs
-	assert_int(entity_a.ecs_id).is_greater(0)
-	assert_int(entity_b.ecs_id).is_greater(0)
-	assert_int(entity_a.ecs_id).is_not_equal(entity_b.ecs_id)
+	# After registration, should have unique nonzero handles
+	assert_int(entity_a.id).is_not_equal(0)
+	assert_int(entity_b.id).is_not_equal(0)
+	assert_int(entity_a.id).is_not_equal(entity_b.id)
 
 
 ## Test 10 (slot key uses stable ID): The slot key for an entity-targeted relationship
-## uses "entity#<ecs_id>" format, not "entity#<instance_id>".
+## uses "entity#<id>" format, not "entity#<instance_id>".
 func test_slot_key_uses_stable_id():
 	var entity = Entity.new()
 	var target = Entity.new()
@@ -225,13 +225,13 @@ func test_slot_key_uses_stable_id():
 	var rel = Relationship.new(C_TestA.new(), target)
 	var slot_key = world._relationship_slot_key(rel)
 
-	# Should contain entity#<ecs_id>, not instance_id
-	var expected_suffix = "entity#" + str(target.ecs_id)
+	# Should contain entity#<id>, not instance_id
+	var expected_suffix = "entity#" + str(target.id)
 	assert_str(slot_key).contains(expected_suffix)
 	assert_str(slot_key).starts_with("rel://")
 	assert_str(slot_key).contains("::")
 
-	# Ensure it does NOT use instance_id (they should differ from ecs_id)
+	# Ensure it does NOT use instance_id (they should differ from the handle id)
 	var instance_suffix = "entity#" + str(target.get_instance_id())
-	if target.ecs_id != target.get_instance_id():
+	if target.id != target.get_instance_id():
 		assert_str(slot_key).not_contains(instance_suffix)

@@ -242,7 +242,7 @@ func test_relay_goes_to_unreliable():
 	# After a tick past the HIGH threshold, it appears in unreliable_rpc_calls.
 	var sender = SyncSender.new(mock_ns)
 	var relay_data = {"MockCompHigh": {"speed": 99.0}}
-	sender.queue_relay_data("test_entity_1", relay_data)
+	sender.queue_relay_data(4242, relay_data)
 
 	# Advance past HIGH interval (0.05 s) to trigger dispatch
 	sender.tick(0.06)
@@ -250,7 +250,7 @@ func test_relay_goes_to_unreliable():
 	assert_int(mock_ns.unreliable_rpc_calls.size()).is_greater(0)
 	var found = false
 	for batch in mock_ns.unreliable_rpc_calls:
-		if batch.has("test_entity_1"):
+		if batch.has(4242):
 			found = true
 			break
 	assert_bool(found).is_true()

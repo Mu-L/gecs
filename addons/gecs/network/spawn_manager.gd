@@ -119,8 +119,8 @@ func handle_spawn_entity(data: Dictionary) -> void:
 	if session_id != _ns._game_session_id:
 		return
 
-	var entity_id = data.get("id", "")
-	if entity_id == "":
+	var entity_id = data.get("id", 0)
+	if not (entity_id is int) or entity_id == 0:
 		return
 
 	var scene_path = data.get("scene_path", "")
@@ -144,6 +144,8 @@ func handle_spawn_entity(data: Dictionary) -> void:
 	else:
 		entity = Entity.new()
 
+	# Keep the authority's identity verbatim — the world registers the
+	# pre-assigned int handle instead of allocating a local one.
 	entity.id = entity_id
 	entity.name = data.get("name", "Entity")
 
@@ -168,7 +170,7 @@ func handle_spawn_entity(data: Dictionary) -> void:
 ## Handle an incoming despawn payload.
 ## Rejects silently if session_id != _ns._game_session_id.
 ## Graceful no-op if entity_id is unknown.
-func handle_despawn_entity(entity_id: String, session_id: int = 0) -> void:
+func handle_despawn_entity(entity_id: int, session_id: int = 0) -> void:
 	# Reject stale despawns from previous game sessions
 	if session_id != _ns._game_session_id:
 		return

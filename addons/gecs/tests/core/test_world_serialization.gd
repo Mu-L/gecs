@@ -43,7 +43,7 @@ func test_basic_entity_serialization():
 
 	# Validate serialized structure
 	assert_that(serialized_data).is_not_null()
-	assert_that(serialized_data.version).is_equal("0.2")
+	assert_that(serialized_data.version).is_equal("0.3")
 	assert_that(serialized_data.entities).has_size(1)
 
 	var entity_data = serialized_data.entities[0]

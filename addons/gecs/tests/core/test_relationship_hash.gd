@@ -132,9 +132,9 @@ func test_relationship_matching_with_multiple_relationships():
 		)
 		print(
 			"  - Target IDs: ",
-			rel.target.id if rel.target else "null",
+			str(rel.target.id) if rel.target else "null",
 			" vs ",
-			test_rel.target.id if test_rel.target else "null"
+			str(test_rel.target.id) if test_rel.target else "null"
 		)
 		print("  - Targets same instance: ", rel.target == test_rel.target)
 

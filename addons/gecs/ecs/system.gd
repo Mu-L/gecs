@@ -72,14 +72,19 @@ enum FlushMode { PER_SYSTEM, PER_GROUP, MANUAL }
 @export var command_buffer_flush_mode: FlushMode = FlushMode.PER_SYSTEM
 
 @export_group("Iteration")
-## When true (default), entity arrays are copied before iteration to guard against
-## mutation skipping from mid-iteration structural changes (add/remove component).
-## Set to false when ALL structural changes go through [member cmd] (CommandBuffer),
-## since deferred commands never mutate during iteration — skipping the copy entirely.
-@export var safe_iteration: bool = true
+## When false (the default since v9), systems iterate the archetype entity arrays
+## directly — zero-copy. ALL structural changes made during iteration must go
+## through [member cmd] (CommandBuffer); direct add/remove during the loop can
+## skip entities via swap-remove (a debug-mode error points offenders at cmd).
+## Set to true to restore the v8 behavior: entity arrays are copied before
+## iteration so direct structural mutation mid-loop stays safe, at the cost of
+## a per-archetype allocation every frame.
+## Project-wide escape hatch: set the [code]gecs/settings/safe_iteration_default[/code]
+## project setting to true to flip the default back for every system.
+@export var safe_iteration: bool = GecsSettings.get_safe_iteration_default()
 
 @export_group("Profiling")
-## When true, registers a custom entry under [code]gecs/systems/<name>[/code]
+## When true, registers a custom entry named [code]<script_name> - [GECS][/code]
 ## in Godot's built-in Debugger → Monitors panel, graphing this system's
 ## current-frame execution time in [b]milliseconds[/b] with decimals — same
 ## formatting as Godot's built-in [code]Process[/code] / [code]Physics Process[/code]
@@ -110,6 +115,10 @@ var systemLogger = GECSLogger.new().domain("System")
 ##       lastRunData["events"] = ["event1", "event2"]
 var lastRunData := {}
 
+## Cached display name for the debugger (script basename). Computed once in
+## [method _internal_setup] so [method _handle] never rebuilds it per frame.
+var _debug_name := ""
+
 ## Reference to the world this system belongs to (set by World.add_system)
 var _world: World = null
 ## Convenience property for accessing query builder (returns _world.query or ECS.world.query)
@@ -138,6 +147,13 @@ var _uses_non_structural_cached: int = -1
 var _subsystem_non_structural_cache: Array[int] = []
 ## Cached per-subsystem timers (null if no timer for that subsystem index)
 var _subsystem_timers_cache: Array = []
+
+## CHANGE DETECTION: write-clock baseline from this system's previous run.
+## Entities/archetypes whose tracked columns have no writes newer than this
+## are skipped when the query uses .changed().
+var _last_change_baseline: int = 0
+## Per-subsystem baselines (parallel to _subsystems_cache)
+var _subsystem_change_baselines: Array[int] = []
 
 ## Cached last execution time in ms — mirrored from lastRunData["execution_time_ms"]
 ## so the Performance monitor callable returns a primitive float with no Dict lookup.
@@ -260,6 +276,11 @@ func reset_performance_metrics() -> void:
 ## INTERNAL: Called by World.add_system() to initialize the system
 ## DO NOT CALL OR OVERRIDE - this is framework code
 func _internal_setup():
+	# Cache the debugger display name once (script basename) so the per-frame
+	# hot path never recomputes it.
+	var script := get_script()
+	if script and script.resource_path:
+		_debug_name = script.resource_path.get_file().get_basename()
 	# Call user setup
 	setup()
 	# If the export flag was ticked in the inspector, register the monitor now that
@@ -420,19 +441,39 @@ func _handle(delta: float) -> void:
 	if measure_time:
 		start_time_usec = Time.get_ticks_usec()
 	if ECS.debug:
+		if _debug_name == "":
+			var script := get_script()
+			if script and script.resource_path:
+				_debug_name = script.resource_path.get_file().get_basename()
 		lastRunData = {
-			"system_name": get_script().resource_path.get_file().get_basename(),
+			"system_name": _debug_name,
 			"frame_delta": delta,
 		}
 	if _has_subsystems_cached == -1:
 		_has_subsystems_cached = 1 if not sub_systems().is_empty() else 0
+	# CHANGE DETECTION: advance the global write clock once per system run so
+	# writes made DURING this run carry a tick newer than this system's baseline
+	# (no self-retriggering) while still being seen by later systems.
+	Archetype.global_change_tick += 1
+	# Track unsafe-iteration depth so the world can flag direct structural
+	# mutation during zero-copy iteration (debug aid; safe_iteration systems
+	# copy their arrays and are exempt).
+	var track_iteration := not safe_iteration and _world != null
+	if track_iteration:
+		_world._iteration_depth += 1
 	if _has_subsystems_cached == 1:
 		_run_subsystems(delta)
 	else:
 		_run_process(delta)
+	if track_iteration:
+		_world._iteration_depth -= 1
 	# Flush command buffer if mode is PER_SYSTEM
 	if command_buffer_flush_mode == FlushMode.PER_SYSTEM and has_pending_commands():
 		cmd.execute()
+	# CHANGE DETECTION: advance the clock again after the run so writes made
+	# BETWEEN runs (user code, observers, other frames) stamp a tick strictly
+	# newer than this run's baseline — without this they'd tie and be missed.
+	Archetype.global_change_tick += 1
 
 	if measure_time:
 		var end_time_usec = Time.get_ticks_usec()
@@ -469,6 +510,7 @@ func _run_subsystems(delta: float) -> void:
 		_subsystems_cache = sub_systems()
 		_subsystem_non_structural_cache.clear()
 		_subsystem_timers_cache.clear()
+		_subsystem_change_baselines.clear()
 		for subsystem_tuple in _subsystems_cache:
 			var sq := subsystem_tuple[0] as QueryBuilder
 			_subsystem_non_structural_cache.append(
@@ -477,6 +519,7 @@ func _run_subsystems(delta: float) -> void:
 			_subsystem_timers_cache.append(
 				subsystem_tuple[2] if subsystem_tuple.size() > 2 else null
 			)
+			_subsystem_change_baselines.append(0)
 	var subsystem_index := 0
 	for subsystem_tuple in _subsystems_cache:
 		var subsystem_query := subsystem_tuple[0] as QueryBuilder
@@ -521,21 +564,38 @@ func _run_subsystems(delta: float) -> void:
 			# Structural fast path archetype iteration
 			var total_entity_count := 0
 			var enabled_filter = subsystem_query._enabled_filter
+			var changed_keys: Array = subsystem_query.get_changed_keys()
+			var has_change_filter := not changed_keys.is_empty()
+			var sub_baseline: int = _subsystem_change_baselines[subsystem_index]
 			for archetype in subsystem_query.archetypes():
 				if archetype.entities.is_empty():
+					continue
+				if (
+					has_change_filter
+					and not archetype.has_changes_since(changed_keys, sub_baseline)
+				):
 					continue
 				# Apply enabled/disabled filter at archetype level via bitset
 				var arch_entities: Array[Entity]
 				if enabled_filter != null:
 					arch_entities = archetype.get_entities_by_enabled_state(enabled_filter)
+					if has_change_filter:
+						arch_entities = _filter_changed_in_baseline(
+							archetype, arch_entities, changed_keys, sub_baseline
+						)
+				elif has_change_filter:
+					arch_entities = archetype.get_changed_entities(changed_keys, sub_baseline)
 				else:
-					arch_entities = archetype.entities.duplicate()
+					# Zero-copy unless safe_iteration opted back in (see _run_process)
+					arch_entities = (
+						archetype.entities.duplicate() if safe_iteration else archetype.entities
+					)
 				if arch_entities.is_empty():
 					continue
 				total_entity_count += arch_entities.size()
 				var components = []
 				if not iterate_comps.is_empty():
-					if enabled_filter != null:
+					if enabled_filter != null or has_change_filter:
 						# Filtered subset — build columns from entities (can't use archetype columns directly)
 						for comp_type in iterate_comps:
 							components.append(
@@ -550,6 +610,8 @@ func _run_subsystems(delta: float) -> void:
 							)
 							components.append(archetype.get_column(comp_key))
 				subsystem_callable.call(arch_entities, components, delta)
+			if has_change_filter:
+				_subsystem_change_baselines[subsystem_index] = Archetype.global_change_tick
 			if ECS.debug:
 				lastRunData[subsystem_index] = {
 					"subsystem_index": subsystem_index,
@@ -608,11 +670,24 @@ func _run_process(delta: float) -> void:
 	# Structural fast path — single pass over archetypes
 	var matching_archetypes = _query_cache.archetypes()
 	var enabled_filter = _query_cache._enabled_filter
+	# CHANGE DETECTION: resolved comp keys when the query uses .changed()
+	var changed_keys: Array = _query_cache.get_changed_keys()
+	var has_change_filter := not changed_keys.is_empty()
 	var processed_any := false
 	for arch in matching_archetypes:
+		# CHANGE DETECTION: skip the WHOLE archetype when none of the tracked
+		# columns wrote since this system's last run — one int compare per column.
+		if has_change_filter and not arch.has_changes_since(changed_keys, _last_change_baseline):
+			continue
 		var arch_entities: Array[Entity]
 		if enabled_filter != null:
 			arch_entities = arch.get_entities_by_enabled_state(enabled_filter)
+			if has_change_filter:
+				arch_entities = _filter_changed_in_baseline(
+					arch, arch_entities, changed_keys, _last_change_baseline
+				)
+		elif has_change_filter:
+			arch_entities = arch.get_changed_entities(changed_keys, _last_change_baseline)
 		else:
 			arch_entities = arch.entities
 		if arch_entities.is_empty():
@@ -621,15 +696,15 @@ func _run_process(delta: float) -> void:
 		# Snapshot entities to avoid mutation skipping during component add/remove.
 		# When safe_iteration is false the system uses CommandBuffer for ALL structural
 		# changes so the snapshot copy is unnecessary — use the archetype array directly.
-		# When enabled_filter is set, arch_entities is already a new array from get_entities_by_enabled_state.
+		# When enabled/change filters are set, arch_entities is already a fresh array.
 		var snapshot_entities = (
 			arch_entities
-			if enabled_filter != null
+			if enabled_filter != null or has_change_filter
 			else (arch_entities.duplicate() if safe_iteration else arch_entities)
 		)
 		var components = []
 		if not iterate_comps.is_empty():
-			if enabled_filter != null:
+			if enabled_filter != null or has_change_filter:
 				for comp_type in _query_cache._iterate_components:
 					components.append(
 						_build_component_column_from_entities(snapshot_entities, comp_type)
@@ -646,6 +721,10 @@ func _run_process(delta: float) -> void:
 			if ECS.debug:
 				lastRunData["parallel"] = false
 			process(snapshot_entities, components, delta)
+	# CHANGE DETECTION: writes made during THIS run carry the current tick;
+	# adopting it as the new baseline excludes them next frame (no self-retrigger).
+	if has_change_filter:
+		_last_change_baseline = Archetype.global_change_tick
 	if not processed_any:
 		if process_empty:
 			process([], [], delta)
@@ -685,6 +764,23 @@ func _query_has_non_structural_filters(qb: QueryBuilder) -> bool:
 			if not query.is_empty():
 				return true
 	return false
+
+
+## CHANGE DETECTION: filter an already-selected entity list to rows whose
+## tracked columns wrote after [param baseline]. Untracked columns and
+## entities outside the archetype count as changed (safe default).
+func _filter_changed_in_baseline(
+	arch: Archetype, list: Array[Entity], changed_keys: Array, baseline: int
+) -> Array[Entity]:
+	var out: Array[Entity] = []
+	for e in list:
+		var index = arch.entity_to_index.get(e, -1)
+		for ck in changed_keys:
+			var versions = arch.column_versions.get(ck)
+			if versions == null or index == -1 or versions[index] > baseline:
+				out.append(e)
+				break
+	return out
 
 
 ## Build component arrays for iterate() when falling back to execute() result (no archetype columns)

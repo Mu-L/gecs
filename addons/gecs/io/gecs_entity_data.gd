@@ -6,7 +6,15 @@ extends Resource
 @export var components: Array[Component] = []
 @export var relationships: Array[GecsRelationshipData] = []
 @export var auto_included: bool = false
-@export var id: String = ""
+## Entity identity handle. v9+ saves store the int [member Entity.id] verbatim.
+## Legacy (pre-v9) saves stored a String UUID here — @export_storage keeps the
+## property untyped so old files load their String verbatim and GECSIO can apply
+## the legacy shim (fresh handle + load-time old-id mapping) instead of silently
+## coercing the UUID to 0.
+@export_storage var id = 0
+## Optional semantic alias ([member Entity.alias]); "" when unset.
+## Missing from legacy saves — defaults to "" for backward compatibility.
+@export var alias: String = ""
 
 
 func _init(
@@ -15,7 +23,8 @@ func _init(
 	_components: Array[Component] = [],
 	_relationships: Array[GecsRelationshipData] = [],
 	_auto_included: bool = false,
-	_id: String = ""
+	_id: int = 0,
+	_alias: String = ""
 ):
 	entity_name = _name
 	scene_path = _scene_path
@@ -23,3 +32,4 @@ func _init(
 	relationships = _relationships
 	auto_included = _auto_included
 	id = _id
+	alias = _alias

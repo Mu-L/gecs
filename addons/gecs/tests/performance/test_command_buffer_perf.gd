@@ -197,6 +197,26 @@ func test_state_transition_command_buffer(
 	_write_perf_result("state_transition_command_buffer", scale, time_ms)
 
 
+## Time ONLY cmd.execute() — queueing happens outside the timed region.
+## Isolates flush/replay throughput (per-entity state transition: remove+add).
+func test_cmd_flush_isolation(scale: int, test_parameters := [[100], [1000], [10000]]) -> void:
+	var entities: Array[Entity] = []
+	for i in scale:
+		var entity = TestA.new()
+		entity.add_component(C_TestB.new())
+		world.add_entity(entity)
+		entities.append(entity)
+
+	var cmd = CommandBuffer.new(world)
+	for entity in entities:
+		cmd.remove_component(entity, C_TestB)
+		cmd.add_component(entity, C_TestC.new())
+
+	var time_ms := PerfHelpers.time_it(func(): cmd.execute())
+
+	PerfHelpers.record_result("cmd_flush_isolation", scale, time_ms)
+
+
 ## Test cache invalidation count (verify optimization)
 func test_cache_invalidation_optimization(
 	scale: int, test_parameters := [[100], [1000], [10000]]

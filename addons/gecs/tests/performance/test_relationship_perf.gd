@@ -79,3 +79,42 @@ func test_get_relationships_cached_probe(
 				var _rels: Array = e.get_relationships(probe)
 	)
 	PerfHelpers.record_result("relationship_get_relationships_cached", scale, time_ms)
+
+
+## Relationship mutation throughput: add + remove one relationship per entity,
+## repeated for 2 cycles against the same (relation, target) pairs. Cycle 2
+## re-hits the same pair archetypes — cycle2/cycle1 ratio shows whether the
+## pair/edge infrastructure survives removal.
+func test_relationship_mutation(
+	scale: int,
+	test_parameters := [[100], [1000]],
+) -> void:
+	var entities: Array = []
+	var target := Entity.new()
+	target.name = "MutTarget"
+	world.add_entity(target)
+	for i in scale:
+		var e := Entity.new()
+		e.name = "MutEntity_%d" % i
+		world.add_entity(e)
+		entities.append(e)
+
+	var cycle_times: Array[float] = []
+	for cycle in 2:
+		var time_ms := PerfHelpers.time_it(
+			func():
+				for e in entities:
+					e.add_relationship(Relationship.new(C_TestA.new(), target))
+				for e in entities:
+					e.remove_relationship(Relationship.new(C_TestA.new(), target))
+		)
+		cycle_times.append(time_ms)
+
+	PerfHelpers.record_result("relationship_mutation_cycle1", scale, cycle_times[0])
+	PerfHelpers.record_result("relationship_mutation_cycle2", scale, cycle_times[1])
+	prints(
+		(
+			"relationship mutation cycle2/cycle1 ratio: %.2f"
+			% (cycle_times[1] / maxf(cycle_times[0], 0.001))
+		)
+	)

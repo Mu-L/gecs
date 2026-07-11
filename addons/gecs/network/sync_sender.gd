@@ -75,7 +75,7 @@ func register_send_handler(comp_type_name: String, handler: Callable) -> void:
 
 ## Server-side relay: queue validated client data into HIGH bucket so it is
 ## broadcast to all other clients at the next HIGH-priority flush.
-func queue_relay_data(entity_id: String, comp_data: Dictionary) -> void:
+func queue_relay_data(entity_id: int, comp_data: Dictionary) -> void:
 	var priority: int = CN_NetSync.Priority.HIGH
 
 	if not _pending[priority].has(entity_id):

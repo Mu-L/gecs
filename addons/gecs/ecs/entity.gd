@@ -48,9 +48,12 @@ signal relationships_batch_removed(entity: Entity, _relationships: Array)
 #endregion Signals
 
 #region Exported Variables
-## The id of the entity either UUID or custom string.
-## This must be unique within a [World]. If left blank, a UUID will be generated when the entity is added to a world.
-@export var id: String
+## Optional human-readable name for this entity, unique within a [World].
+## Registered in the world's alias registry at add time — look up with
+## [method World.get_entity_by_alias]. An alias is a NAME, not an identity:
+## the entity's identity is the int handle [member id].
+## (Replaces the v8 pattern of assigning semantic strings to `id`.)
+@export var alias: StringName = &""
 ## Is this entity active? (Will show up in queries)
 @export var enabled: bool = true:
 	set(value):
@@ -73,6 +76,11 @@ var components: Dictionary = {}
 ## Relationships attached to the entity
 var relationships: Array[Relationship] = []
 
+## Relationship bucket index: relation script instance_id -> Array[Relationship].
+## Narrows get/has_relationship scans from O(all rels) to O(rels of that type);
+## wildcard probes (relation == null) fall back to the full array.
+var _rels_by_relation: Dictionary = {}
+
 ## Cache for component keys to avoid repeated .get_script().get_instance_id() calls
 var _component_key_cache: Dictionary = {}
 
@@ -91,10 +99,26 @@ var _entityLogger = GECSLogger.new().domain("Entity")
 ## We can store ephemeral state on the entity
 var _state = {}
 
-## Stable integer ID assigned by World during registration.
-## Used for deterministic relationship slot key generation (not the same as the string UUID `id`).
-## Value is 0 until the entity is registered with a World.
-var ecs_id: int = 0
+## THE entity identity: a 64-bit generational handle assigned by the World —
+## low 32 bits = slot index, high 32 bits = generation (bumped when a slot is
+## recycled, so stale handles are detected in O(1) via [method World.is_alive]).
+## 0 until registered with a World. Replaces BOTH the v8 String UUID `id` and
+## the sequential `ecs_id`: relationship pair keys, serialization, and network
+## replication all use this single int. Pre-assign a nonzero value before
+## [method World.add_entity] (deserialization / network spawn) to keep a
+## foreign identity — the world registers it verbatim instead of allocating.
+var id: int = 0
+
+## The [World] currently tracking this entity (set by World.add_entity/enable_entity,
+## cleared by remove_entity/disable_entity). Structural mutations notify it via
+## DIRECT calls instead of signal dispatch — the entity-level signals still emit
+## for user code, but the world is no longer a signal subscriber (a signal emit
+## costs ~3x a direct call, and connect/disconnect per entity lifecycle is gone).
+var _world: World = null
+
+## Position in World.entities — maintained by the world for O(1) swap-removal.
+## -1 while not in a world's entity list.
+var _entities_index: int = -1
 
 #endregion Public Variables
 
@@ -188,7 +212,10 @@ func add_component(component: Resource) -> void:
 	component.parent = self
 	if not component.property_changed.is_connected(_on_component_property_changed):
 		component.property_changed.connect(_on_component_property_changed)
-	## Adding components happens through a signal
+	# Notify the world directly (archetype move + observer dispatch), then emit
+	# the entity-level signal for user code — same order as the old subscription.
+	if _world:
+		_world._on_entity_component_added(self, component)
 	component_added.emit(self, component)
 	_entityLogger.trace("Added Component: ", comp_key)
 
@@ -199,7 +226,12 @@ func _on_component_property_changed(
 	old_value: Variant,
 	new_value: Variant,
 ) -> void:
-	# Pass this signal on to the world
+	# Single hop: notify the world directly (observer CHANGED dispatch + monitor
+	# eval), then re-emit for user code listening on the entity.
+	if _world:
+		_world._on_entity_component_property_change(
+			self, component, property_name, old_value, new_value
+		)
 	component_property_changed.emit(self, component, property_name, old_value, new_value)
 
 
@@ -227,34 +259,24 @@ func add_components(_components: Array):
 	if added_components.is_empty():
 		return
 
-	# OPTIMIZATION: Move to final archetype only once, after all components are added
-	if ECS.world and ECS.world.entity_to_archetype.has(self):
-		var old_archetype = ECS.world.entity_to_archetype[self]
-		var new_signature = ECS.world._calculate_entity_signature(self)
-		var comp_types = ECS.world._get_entity_archetype_keys(self)
-		var new_archetype = ECS.world._get_or_create_archetype(new_signature, comp_types)
+	# OPTIMIZATION: One archetype transition for the whole batch. The per-component
+	# component_added emits below make the world handler queue a deferred move
+	# (instead of recomputing the signature per component); closing the window
+	# commits a single transition. Nested inside an outer window (CommandBuffer
+	# flush), owns=false and the outer window commits instead.
+	var owns_deferral := false
+	if ECS.world:
+		owns_deferral = ECS.world._begin_deferred_moves()
+		ECS.world._refresh_entity_archetype(self)
 
-		# Only move if we actually need a different archetype
-		if old_archetype != new_archetype:
-			# Remove from old archetype
-			old_archetype.remove_entity(self)
-			# Add to new archetype
-			new_archetype.add_entity(self)
-			ECS.world.entity_to_archetype[self] = new_archetype
-
-			# Clean up empty old archetype
-			if old_archetype.is_empty():
-				ECS.world._delete_archetype(old_archetype)
-		else:
-			# Same archetype - just update the column data for new components
-			for component in added_components:
-				var comp_key = _comp_key(component)
-				var entity_index = old_archetype.entity_to_index[self]
-				old_archetype.columns[comp_key][entity_index] = component
-
-	# Emit signals for all added components
+	# Notify world + emit signals for all added components
 	for component in added_components:
+		if _world:
+			_world._on_entity_component_added(self, component)
 		component_added.emit(self, component)
+
+	if owns_deferral:
+		ECS.world._end_deferred_moves()
 
 
 ## Removes a single component from the entity.[br]
@@ -283,8 +305,10 @@ func remove_component(component: Resource) -> void:
 		if component_instance.property_changed.is_connected(_on_component_property_changed):
 			component_instance.property_changed.disconnect(_on_component_property_changed)
 
+		# Notify the world directly (archetype move + observer REMOVED), then emit
+		if _world:
+			_world._on_entity_component_removed(self, component_instance)
 		component_removed.emit(self, component_instance)
-		# ARCHETYPE: Signal handler (_on_entity_component_removed) handles archetype update
 		_entityLogger.trace("Removed Component: ", comp_key)
 
 
@@ -333,28 +357,20 @@ func remove_components(_components: Array):
 	if removed_components.is_empty():
 		return
 
-	# OPTIMIZATION: Move to final archetype only once, after all components are removed
-	if ECS.world and ECS.world.entity_to_archetype.has(self):
-		var old_archetype = ECS.world.entity_to_archetype[self]
-		var new_signature = ECS.world._calculate_entity_signature(self)
-		var comp_types = ECS.world._get_entity_archetype_keys(self)
-		var new_archetype = ECS.world._get_or_create_archetype(new_signature, comp_types)
+	# OPTIMIZATION: One archetype transition for the whole batch (see add_components).
+	var owns_deferral := false
+	if ECS.world:
+		owns_deferral = ECS.world._begin_deferred_moves()
+		ECS.world._refresh_entity_archetype(self)
 
-		# Only move if we actually need a different archetype
-		if old_archetype != new_archetype:
-			# Remove from old archetype
-			old_archetype.remove_entity(self)
-			# Add to new archetype
-			new_archetype.add_entity(self)
-			ECS.world.entity_to_archetype[self] = new_archetype
-
-			# Clean up empty old archetype
-			if old_archetype.is_empty():
-				ECS.world._delete_archetype(old_archetype)
-
-	# Emit signals for all removed components
+	# Notify world + emit signals for all removed components
 	for component in removed_components:
+		if _world:
+			_world._on_entity_component_removed(self, component)
 		component_removed.emit(self, component)
+
+	if owns_deferral:
+		ECS.world._end_deferred_moves()
 
 
 ##  Removes all components from the entity.[br]
@@ -371,19 +387,75 @@ func remove_all_components() -> void:
 ## [b]Example:[/b]
 ##     [codeblock]var transform = entity.get_component(Transform)[/codeblock]
 func get_component(component: Resource) -> Component:
-	return components.get(_comp_key(component), null)
+	# Inlined key derivation — this is the hottest call in non-iterate() systems,
+	# and the _comp_key call itself costs ~0.6us of dispatch overhead.
+	return components.get(
+		component.get_instance_id() if component is Script else component.get_script().get_instance_id(),
+		null
+	)
 
 
 ## Check to see if an entity has a  specific component on it.[br]
 ## This is useful when you're checking to see if it has a component and not going to use the component itself.[br]
 ## If you plan on getting and using the component, use [method get_component] instead.
 func has_component(component: Resource) -> bool:
-	return components.has(_comp_key(component))
+	# Inlined key derivation — see get_component
+	return components.has(
+		component.get_instance_id() if component is Script else component.get_script().get_instance_id()
+	)
+
+
+## CHANGE DETECTION: mark a component as written for queries using .changed().
+## Components whose setters emit [signal Component.property_changed] are stamped
+## automatically — call this only for components mutated directly (no setter).
+## [codeblock]
+## var pos = entity.get_component(C_Position)
+## pos.position.x += 10.0  # direct write, no property_changed emit
+## entity.mark_changed(pos)
+## [/codeblock]
+func mark_changed(component: Resource) -> void:
+	if _world:
+		_world._mark_component_changed(self, component)
 
 
 #endregion Components
 
 #region Relationships
+
+
+## Bucket key for the relationship index (0 = unbucketed/wildcard).
+static func _rel_bucket_key(rel: Relationship) -> int:
+	if rel == null or rel.relation == null:
+		return 0
+	var script = rel.relation.get_script()
+	return script.get_instance_id() if script else 0
+
+
+func _rel_index_add(rel: Relationship) -> void:
+	var key := _rel_bucket_key(rel)
+	if key == 0:
+		return
+	var bucket: Array = _rels_by_relation.get(key, [])
+	if bucket.is_empty():
+		_rels_by_relation[key] = bucket
+	bucket.append(rel)
+
+
+func _rel_index_remove(rel: Relationship) -> void:
+	var key := _rel_bucket_key(rel)
+	if key == 0:
+		return
+	var bucket = _rels_by_relation.get(key)
+	if bucket != null:
+		bucket.erase(rel)
+
+
+## Candidate list for a probe: the type bucket when the probe names a relation,
+## the full array for wildcard probes.
+func _rel_candidates(probe: Relationship) -> Array:
+	if probe == null or probe.relation == null:
+		return relationships
+	return _rels_by_relation.get(_rel_bucket_key(probe), [])
 
 
 ## Adds a relationship to this entity.[br]
@@ -395,6 +467,9 @@ func add_relationship(relationship: Relationship) -> void:
 	)
 	relationship.source = self
 	relationships.append(relationship)
+	_rel_index_add(relationship)
+	if _world:
+		_world._on_entity_relationship_added(self, relationship)
 	relationship_added.emit(self, relationship)
 
 
@@ -406,6 +481,9 @@ func add_relationships(_relationships: Array):
 		)
 		relationship.source = self
 		relationships.append(relationship)
+		_rel_index_add(relationship)
+	if _world:
+		_world._on_entity_relationships_batch_added(self, _relationships)
 	relationships_batch_added.emit(self, _relationships)
 
 
@@ -440,7 +518,7 @@ func remove_relationship(relationship: Relationship, limit: int = -1) -> void:
 		pattern_remove = false
 
 	if pattern_remove:
-		for rel in relationships:
+		for rel in _rel_candidates(relationship):
 			if rel.matches(relationship):
 				to_remove.append(rel)
 				removed_count += 1
@@ -450,6 +528,9 @@ func remove_relationship(relationship: Relationship, limit: int = -1) -> void:
 
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
+		if _world:
+			_world._on_entity_relationship_removed(self, rel)
 		relationship_removed.emit(self, rel)
 
 
@@ -470,7 +551,7 @@ func remove_relationships(_relationships: Array, limit: int = -1):
 			to_remove.append(relationship)
 			pattern_remove = false
 		if pattern_remove:
-			for rel in relationships:
+			for rel in _rel_candidates(relationship):
 				if rel.matches(relationship):
 					to_remove.append(rel)
 					removed_count += 1
@@ -478,6 +559,9 @@ func remove_relationships(_relationships: Array, limit: int = -1):
 						break
 		for rel in to_remove:
 			relationships.erase(rel)
+			_rel_index_remove(rel)
+			if _world:
+				_world._on_entity_relationship_removed(self, rel)
 			relationship_removed.emit(self, rel)
 
 
@@ -486,6 +570,9 @@ func remove_all_relationships() -> void:
 	var to_remove = relationships.duplicate()
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
+		if _world:
+			_world._on_entity_relationship_removed(self, rel)
 		relationship_removed.emit(self, rel)
 
 
@@ -494,7 +581,7 @@ func remove_all_relationships() -> void:
 ## [return] The first matching [Relationship] if it exists, otherwise `null`
 func get_relationship(relationship: Relationship) -> Relationship:
 	var to_remove = []
-	for rel in relationships:
+	for rel in _rel_candidates(relationship):
 		# Check if the relationship is valid
 		if not rel.valid():
 			to_remove.append(rel)
@@ -503,11 +590,13 @@ func get_relationship(relationship: Relationship) -> Relationship:
 			# Remove invalid relationships before returning
 			for invalid_rel in to_remove:
 				relationships.erase(invalid_rel)
+				_rel_index_remove(invalid_rel)
 				relationship_removed.emit(self, invalid_rel)
 			return rel
 	# Remove invalid relationships
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
 		relationship_removed.emit(self, rel)
 	return null
 
@@ -518,7 +607,7 @@ func get_relationship(relationship: Relationship) -> Relationship:
 func get_relationships(relationship: Relationship) -> Array[Relationship]:
 	var results: Array[Relationship] = []
 	var to_remove = []
-	for rel in relationships:
+	for rel in _rel_candidates(relationship):
 		# Check if the relationship is valid
 		if not rel.valid():
 			to_remove.append(rel)
@@ -528,6 +617,7 @@ func get_relationships(relationship: Relationship) -> Array[Relationship]:
 	# Remove invalid relationships
 	for rel in to_remove:
 		relationships.erase(rel)
+		_rel_index_remove(rel)
 		relationship_removed.emit(self, rel)
 	return results
 
@@ -536,7 +626,7 @@ func get_relationships(relationship: Relationship) -> Array[Relationship]:
 ## Fast path — skips validation/cleanup (use get_relationship when you need the value).[br]
 ## [param relationship] The [Relationship] to check for.
 func has_relationship(relationship: Relationship) -> bool:
-	for rel in relationships:
+	for rel in _rel_candidates(relationship):
 		if rel.matches(relationship):
 			return true
 	return false
@@ -590,9 +680,10 @@ func _on_enabled_changed(old_value: bool, new_value: bool) -> void:
 	var archetype = ECS.world.entity_to_archetype[self]
 	archetype.update_entity_enabled_state(self, new_value)
 
-	# Invalidate query cache since entity enabled state changed.
-	# Route through _invalidate_cache so batch suppression (_begin_suppress/_end_suppress)
-	# can coalesce multiple enable/disable operations into a single cache flush.
-	ECS.world._invalidate_cache("entity_enabled_changed")
+	# Membership (as seen through enabled filters) changed — bump so cached
+	# execute() results go stale. Routed through _bump_membership so batch
+	# suppression (_begin_suppress/_end_suppress) coalesces multiple
+	# enable/disable operations into a single bump.
+	ECS.world._bump_membership("entity_enabled_changed")
 
 #endregion Lifecycle Methods

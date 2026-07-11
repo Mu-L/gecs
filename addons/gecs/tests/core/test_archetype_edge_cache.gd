@@ -1,15 +1,12 @@
 class_name TestArchetypeEdgeCacheBug
 extends GdUnitTestSuite
-## Test suite for archetype edge cache bug
+## Test suite for archetype edge cache behavior.
 ##
-## Tests that archetypes retrieved from edge cache are properly re-registered
-## with the world when they were previously removed due to being empty.
-##
-## Bug sequence:
-## 1. Entity A gets component added -> creates archetype X, cached edge
-## 2. Entity A removed -> archetype X becomes empty, gets removed from world.archetypes
-## 3. Entity B gets same component -> uses cached edge to archetype X
-## 4. BUG: archetype X not in world.archetypes, so queries can't find Entity B
+## v9: empty archetypes are RETAINED (their transition edges survive churn);
+## deletion only happens via World.compact(). These tests cover both the
+## retention/reuse contract and the ARCH-01/ARCH-04 stale-edge guards that
+## apply after a compact() deletes archetypes whose edges are still cached
+## in surviving neighbors.
 
 var runner: GdUnitSceneRunner
 var world: World
@@ -26,8 +23,9 @@ func after_test():
 		world.purge(false)
 
 
-## Test that archetypes retrieved from edge cache are re-registered with world
-func test_archetype_reregistered_after_edge_cache_retrieval():
+## v9: empty archetypes are RETAINED (World.compact() reclaims explicitly), so
+## churn reuses the same archetype object and its transition edges stay valid.
+func test_archetype_retained_and_reused_after_emptying():
 	# ARRANGE: Create two entities with same initial components
 	var entity1 = Entity.new()
 	entity1.add_component(C_TestA.new())
@@ -48,20 +46,14 @@ func test_archetype_reregistered_after_edge_cache_retrieval():
 	# Verify archetype is in world.archetypes
 	assert_bool(world.archetypes.has(signature_with_b)).is_true()
 
-	# ACT 2: Remove entity1 to make archetype empty (triggers cleanup)
+	# ACT 2: Remove entity1 — the archetype becomes empty but is KEPT
 	world.remove_entity(entity1)
+	assert_bool(world.archetypes.has(signature_with_b)).is_true()
 
-	# Verify archetype was removed from world.archetypes when empty
-	assert_bool(world.archetypes.has(signature_with_b)).is_false()
-
-	# ACT 3: Add ComponentB to entity2 (should use edge cache)
-	# This is where the bug would occur - archetype retrieved from cache
-	# but not re-registered with world
+	# ACT 3: Add ComponentB to entity2 — edge cache reuses the SAME archetype object
 	var comp_b2 = C_TestB.new()
 	entity2.add_component(comp_b2)
-
-	# ASSERT: Archetype should be back in world.archetypes
-	assert_bool(world.archetypes.has(signature_with_b)).is_true()
+	assert_object(world.entity_to_archetype[entity2]).is_same(archetype_with_b)
 
 	# ASSERT: Query should find entity2
 	var query = QueryBuilder.new(world).with_all([C_TestA, C_TestB])
@@ -133,8 +125,10 @@ func test_fast_path_stale_edge_after_archetype_deletion():
 	var original_ab_archetype = world.entity_to_archetype[entity1]
 	var signature_with_b = original_ab_archetype.signature
 
-	## ACT 1: remove entity1 -> A+B deleted; A-only stays alive (entity_keeper); stale edge persists
+	## ACT 1: remove entity1 then compact() -> A+B deleted (v9 keeps empties until
+	## compact); A-only stays alive (entity_keeper); stale edge scenario begins
 	world.remove_entity(entity1)
+	world.compact()
 	assert_bool(world.archetypes.has(signature_with_b)).is_false()
 
 	## ACT 2: entity2 -> fast path finds stale edge; current code re-registers original_ab_archetype
@@ -143,8 +137,9 @@ func test_fast_path_stale_edge_after_archetype_deletion():
 	world.add_entities([entity2])
 	entity2.add_component(C_TestB.new())
 
-	## ACT 3: remove entity2 -> A+B deleted again; A-only stays; stale edge in A-only persists
+	## ACT 3: remove entity2 + compact -> A+B deleted again; A-only stays; stale edge scenario repeats
 	world.remove_entity(entity2)
+	world.compact()
 	assert_bool(world.archetypes.has(signature_with_b)).is_false()
 
 	## ACT 4: entity3 -> fast path finds same stale edge; re-registers original_ab_archetype again
@@ -228,9 +223,11 @@ func test_no_stale_reverse_edge_after_edge_reassignment():
 	## AB exists, remove_edges[b] = A-only archetype
 	assert_bool(world.archetypes.has(ab_archetype.signature)).is_true()
 
-	## ACT 2: Remove entity1 -> A+B (ab_archetype) becomes empty -> _delete_archetype clears A.add_edges[b].
-	## A-only survives (entity_keeper). ab_archetype is now a ghost.
+	## ACT 2: Remove entity1 then compact() -> A+B (ab_archetype) deleted ->
+	## _delete_archetype clears A.add_edges[b]. A-only survives (entity_keeper).
+	## ab_archetype is now a ghost. (v9 keeps empties until compact.)
 	world.remove_entity(entity1)
+	world.compact()
 	assert_bool(world.archetypes.has(ab_archetype.signature)).is_false()
 
 	## ARRANGE: Add entity2 to A-only (before entity3 creates a new AB cycle).

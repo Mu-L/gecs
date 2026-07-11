@@ -227,6 +227,11 @@ func test_subsystem_archetype_move_at_scale():
 ## System that adds components in subsystem 1 and checks them in subsystem 2
 class ComponentAdditionPropagationSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var subsystem1_count = 0
 	var subsystem2_count = 0
 
@@ -250,6 +255,11 @@ class ComponentAdditionPropagationSystem:
 ## System that removes components in subsystem 1 and checks them in subsystem 2
 class ComponentRemovalPropagationSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var subsystem1_count = 0
 	var subsystem2_count = 0
 
@@ -271,6 +281,11 @@ class ComponentRemovalPropagationSystem:
 ## System that moves entities between archetypes
 class ArchetypeMovePropagationSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var subsystem1_count = 0
 	var subsystem2_count = 0
 	var subsystem3_count = 0
@@ -299,6 +314,11 @@ class ArchetypeMovePropagationSystem:
 ## System that tracks individual entity processing to detect double-processing
 class NoDoubleProcessingSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var entity1_process_count = 0
 	var entity2_process_count = 0
 	var tracked_entities = {}
@@ -330,6 +350,11 @@ class NoDoubleProcessingSystem:
 ## System that performs multiple sequential archetype moves
 class MultipleArchetypeMovesSystem:
 	extends System
+
+	func _init() -> void:
+		# These suites verify same-frame propagation of DIRECT structural
+		# mutation during iteration - the pattern safe_iteration exists for.
+		safe_iteration = true
 	var subsystem1_count = 0
 	var subsystem2_count = 0
 	var subsystem3_count = 0

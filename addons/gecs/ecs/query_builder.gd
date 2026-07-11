@@ -66,6 +66,14 @@ var _observer_rel_remove_types: Array = []
 # Custom event names this query listens for (StringName).
 var _observer_event_names: Array[StringName] = []
 
+# CHANGE DETECTION: components watched by .changed() (empty = all with_all comps)
+var _changed_components: Array = []
+var _uses_change_filter: bool = false
+# Resolved comp keys for the change filter (lazy, see get_changed_keys)
+var _changed_keys_cache: Array = []
+# Baseline tick for execute() outside a System (0 = everything counts as changed)
+var _since_tick: int = 0
+
 # Add fields for query result caching
 var _cache_valid: bool = false
 var _cached_result: Array = []
@@ -282,6 +290,34 @@ func iterate(components: Array) -> QueryBuilder:
 	return self
 
 
+## CHANGE DETECTION (FLECS-style): only include entities whose listed
+## components were WRITTEN since the system last ran. Systems using this skip
+## entire archetypes nothing wrote to — the biggest frame-time lever for
+## sparse-write workloads.[br]
+## [param components] Components to watch; empty = all [method with_all] components.[br]
+## Writes are detected from setters that emit [signal Component.property_changed];
+## for direct mutation call [method Entity.mark_changed].[br]
+## Outside a System, [method execute] uses baseline 0 (returns everything)
+## unless [method since] sets one.[br]
+## [b]Example:[/b]
+## [codeblock]
+## func query() -> QueryBuilder:
+##     return q.with_all([C_Position, C_Velocity]).changed([C_Position])
+## [/codeblock]
+func changed(components: Array = []) -> QueryBuilder:
+	_changed_components = components
+	_uses_change_filter = true
+	_cache_valid = false
+	return self
+
+
+## Set the change-detection baseline tick for [method execute] calls outside a
+## System (compare against [member World.change_tick]).
+func since(tick: int) -> QueryBuilder:
+	_since_tick = tick
+	return self
+
+
 #region Observer Event Declarations
 ## Declare this query as an [Observer] spec that fires when a component matching
 ## [method with_all]/[method with_any] is added to a matching entity.[br]
@@ -448,8 +484,47 @@ func execute() -> Array:
 		result = _filter_entities_by_queries(
 			result, _any_components, _any_components_queries, false
 		)
+	# CHANGE DETECTION: row-version filter against the since() baseline
+	# (baseline 0 = everything passes; Systems apply their own baseline via
+	# the archetype fast path instead of execute())
+	if _uses_change_filter and _since_tick > 0:
+		result = _filter_changed_entities(result, _since_tick)
 
 	return result
+
+
+## Resolve (once) and return the tracked comp keys for the .changed() filter,
+## registering them with the world's change-tracking on first use.
+func get_changed_keys() -> Array:
+	if not _uses_change_filter:
+		return []
+	if _changed_keys_cache.is_empty():
+		var comps = _changed_components if not _changed_components.is_empty() else _all_components
+		for c in comps:
+			var key: int = c.get_instance_id() if c is Script else c.get_script().get_instance_id()
+			_changed_keys_cache.append(key)
+			if _world:
+				_world._register_change_tracking(key)
+	return _changed_keys_cache
+
+
+func _filter_changed_entities(entities_in: Array, baseline: int) -> Array:
+	var keys := get_changed_keys()
+	if keys.is_empty():
+		return entities_in
+	var out: Array[Entity] = []
+	for e in entities_in:
+		var archetype = _world.entity_to_archetype.get(e)
+		if archetype == null:
+			out.append(e)
+			continue
+		var index = archetype.entity_to_index.get(e, -1)
+		for ck in keys:
+			var versions = archetype.column_versions.get(ck)
+			if versions == null or index == -1 or versions[index] > baseline:
+				out.append(e)
+				break
+	return out
 
 
 func _internal_execute() -> Array:

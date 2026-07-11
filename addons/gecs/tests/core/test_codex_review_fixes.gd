@@ -428,47 +428,53 @@ func test_combine_reclassifies_exclusion_relationship_buckets():
 
 #endregion
 
-#region Regression: purge(keep) must not reset _next_entity_id
+#region Regression: purge(keep) must not alias new handles with kept entities
 
 
-## When purging with a keep list, _next_entity_id must not reset to 1
-## or new entities would get colliding ecs_ids with retained entities,
-## breaking relationship slot-key uniqueness.
-func test_purge_with_keep_preserves_entity_id_counter():
+## When purging with a keep list, the handle allocator must not be reset —
+## a new entity's id must never EQUAL a kept entity's id (no aliasing), or
+## relationship slot-key uniqueness would break for retained entities.
+func test_purge_with_keep_no_id_aliasing():
 	var keeper = Entity.new()
 	var disposable = Entity.new()
 
 	world.add_entity(keeper)
 	world.add_entity(disposable)
 
-	var keeper_id = keeper.ecs_id
-	assert_int(keeper_id).is_greater(0)
+	var keeper_id = keeper.id
+	assert_int(keeper_id).is_not_equal(0)
 
 	# Purge everything except keeper
 	world.purge(false, [keeper])
+
+	# The keeper's handle must survive the purge
+	assert_bool(world.is_alive(keeper_id)).is_true()
 
 	# Add a new entity after purge
 	var newcomer = Entity.new()
 	world.add_entity(newcomer)
 
-	# New entity must NOT get an ecs_id that matches the keeper's
-	assert_int(newcomer.ecs_id).is_not_equal(keeper_id)
-	# And the id counter must still be above the kept entity's id
-	assert_int(newcomer.ecs_id).is_greater(keeper_id)
+	# New entity must NOT get a handle that matches the keeper's — ids are
+	# unique among live entities (recycled slots carry a bumped generation)
+	assert_int(newcomer.id).is_not_equal(keeper_id)
+	assert_object(world.get_entity_by_id(keeper_id)).is_same(keeper)
+	assert_object(world.get_entity_by_id(newcomer.id)).is_same(newcomer)
 
 
-## Full purge (no keep list) should still reset _next_entity_id to 1.
-func test_full_purge_resets_entity_id_counter():
+## Full purge (no keep list) resets the handle allocator, and the first
+## entity added afterwards still gets a valid, live, nonzero handle.
+func test_full_purge_resets_handle_allocator():
 	var entity = Entity.new()
 	world.add_entity(entity)
-	assert_int(entity.ecs_id).is_greater(0)
+	assert_int(entity.id).is_not_equal(0)
 
 	world.purge(false)
 
-	# After full purge, next entity should get id 1
+	# After full purge, the next entity gets a fresh valid handle
 	var newcomer = Entity.new()
 	world.add_entity(newcomer)
-	assert_int(newcomer.ecs_id).is_equal(1)
+	assert_int(newcomer.id).is_not_equal(0)
+	assert_object(world.get_entity_by_id(newcomer.id)).is_same(newcomer)
 
 
 #endregion

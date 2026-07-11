@@ -37,6 +37,9 @@ var signature: int = 0
 ## Used for debugging and archetype matching logic
 var component_types: Array = []
 
+## Set view of component_types for O(1) membership tests in matches_query
+var component_key_set: Dictionary = {}
+
 ## Subset of component_types containing only rel:// prefixed relationship slot keys
 var relationship_types: Array = []
 
@@ -67,6 +70,78 @@ var remove_edges: Dictionary = {}  # Variant (int|String) -> Archetype
 ## Keyed by source archetype instance_id for O(1) operations.
 var neighbors: Dictionary = {}  # int (get_instance_id()) -> Archetype
 
+## CHANGE DETECTION: monotonic global write clock shared by all archetypes
+## (advanced by the World once per system run). Rows are stamped with this
+## tick when written; queries with .changed() compare against a per-system
+## baseline to skip archetypes/rows nothing wrote to.
+static var global_change_tick: int = 1
+
+## CHANGE DETECTION: per-row write versions, LAZILY allocated only for
+## component keys some query tracks via .changed(). Parallel to entities.
+var column_versions: Dictionary = {}  # int (comp_key) -> PackedInt64Array
+## Highest write tick per tracked column — lets systems skip the whole
+## archetype with one comparison when nothing in it changed.
+var column_max_tick: Dictionary = {}  # int (comp_key) -> int
+
+
+## Begin tracking write versions for a column (no-op when already tracked or
+## the archetype lacks the column). Existing rows count as changed "now".
+func ensure_change_tracking(comp_key: int) -> void:
+	if column_versions.has(comp_key) or not columns.has(comp_key):
+		return
+	var versions := PackedInt64Array()
+	versions.resize(entities.size())
+	versions.fill(global_change_tick)
+	column_versions[comp_key] = versions
+	column_max_tick[comp_key] = global_change_tick
+
+
+## Stamp one entity's row in a tracked column with the current global tick.
+func mark_changed(comp_key: int, entity: Entity) -> void:
+	var versions = column_versions.get(comp_key)
+	if versions == null:
+		return
+	var index = entity_to_index.get(entity, -1)
+	if index == -1:
+		return
+	versions[index] = global_change_tick
+	column_versions[comp_key] = versions  # write back (PackedInt64Array is COW)
+	column_max_tick[comp_key] = global_change_tick
+
+
+## Entities whose row version in ANY of the listed tracked columns is newer
+## than [param baseline]. Untracked columns count as always-changed (safe default).
+func get_changed_entities(comp_keys: Array, baseline: int) -> Array[Entity]:
+	# Hoist version arrays out of the row loop — no per-row dict lookups.
+	var version_arrays: Array = []
+	for ck in comp_keys:
+		var v = column_versions.get(ck)
+		if v == null:
+			return entities.duplicate()  # untracked column: everything counts as changed
+		version_arrays.append(v)
+	var result: Array[Entity] = []
+	var n := entities.size()
+	if version_arrays.size() == 1:
+		var v: PackedInt64Array = version_arrays[0]
+		for i in n:
+			if v[i] > baseline:
+				result.append(entities[i])
+	else:
+		for i in n:
+			for v in version_arrays:
+				if v[i] > baseline:
+					result.append(entities[i])
+					break
+	return result
+
+
+## True when any listed column (or an untracked one) wrote after [param baseline].
+func has_changes_since(comp_keys: Array, baseline: int) -> bool:
+	for ck in comp_keys:
+		if column_max_tick.get(ck, global_change_tick) > baseline:
+			return true
+	return false
+
 
 ## Initialize archetype with signature and component types
 func _init(p_signature: int, p_component_types: Array):
@@ -76,6 +151,7 @@ func _init(p_signature: int, p_component_types: Array):
 
 	# Separate relationship slot keys (Strings) from component keys (ints)
 	for comp_type in component_types:
+		component_key_set[comp_type] = true
 		if comp_type is String and comp_type.begins_with("rel://"):
 			relationship_types.append(comp_type)
 		else:
@@ -105,6 +181,14 @@ func add_entity(entity: Entity) -> void:
 			# Push null placeholder, will be fixed when component is added
 			columns[comp_key].append(null)
 
+	# CHANGE DETECTION: new rows count as changed "now" (FLECS semantics —
+	# a system's first sight of an entity processes it)
+	for comp_key in column_versions:
+		var versions: PackedInt64Array = column_versions[comp_key]
+		versions.append(global_change_tick)
+		column_versions[comp_key] = versions
+		column_max_tick[comp_key] = global_change_tick
+
 
 ## Remove an entity from this archetype using swap-remove
 ## O(1) operation: swaps with last entity and pops
@@ -126,6 +210,12 @@ func remove_entity(entity: Entity) -> bool:
 		for comp_key in columns:
 			columns[comp_key][index] = columns[comp_key][last_index]
 
+		# CHANGE DETECTION: keep version rows aligned through the swap
+		for comp_key in column_versions:
+			var versions: PackedInt64Array = column_versions[comp_key]
+			versions[index] = versions[last_index]
+			column_versions[comp_key] = versions
+
 		# OPTIMIZATION: Swap enabled bit
 		var last_enabled = _get_enabled_bit(last_index)
 		_set_enabled_bit(index, last_enabled)
@@ -137,6 +227,11 @@ func remove_entity(entity: Entity) -> bool:
 	# OPTIMIZATION: Remove last element from all columns
 	for comp_key in columns:
 		columns[comp_key].pop_back()
+
+	for comp_key in column_versions:
+		var versions: PackedInt64Array = column_versions[comp_key]
+		versions.resize(versions.size() - 1)
+		column_versions[comp_key] = versions
 
 	# OPTIMIZATION: Update bitset size (no need to clear the bit, just reduce logical size)
 	# The bit will be overwritten when a new entity is added
@@ -177,16 +272,18 @@ func clear() -> void:
 ## [param any_comp_types] Component paths where at least one must be present
 ## [param exclude_comp_types] Component paths that must not be present
 func matches_query(all_comp_types: Array, any_comp_types: Array, exclude_comp_types: Array) -> bool:
+	# Dictionary membership instead of Array.has linear scans — the miss path
+	# tests every archetype against the query, so this is O(terms) not O(terms×types).
 	# Check all_components: must have ALL of these
 	for comp_type in all_comp_types:
-		if not component_types.has(comp_type):
+		if not component_key_set.has(comp_type):
 			return false
 
 	# Check any_components: must have AT LEAST ONE of these
 	if not any_comp_types.is_empty():
 		var has_any = false
 		for comp_type in any_comp_types:
-			if component_types.has(comp_type):
+			if component_key_set.has(comp_type):
 				has_any = true
 				break
 		if not has_any:
@@ -194,7 +291,7 @@ func matches_query(all_comp_types: Array, any_comp_types: Array, exclude_comp_ty
 
 	# Check exclude_components: must have NONE of these
 	for comp_type in exclude_comp_types:
-		if component_types.has(comp_type):
+		if component_key_set.has(comp_type):
 			return false
 
 	return true
@@ -204,26 +301,27 @@ func matches_query(all_comp_types: Array, any_comp_types: Array, exclude_comp_ty
 ## [param required_rel_keys] Relationship slot keys that must all be present
 ## [param excluded_rel_keys] Relationship slot keys that must not be present
 func matches_relationship_query(required_rel_keys: Array, excluded_rel_keys: Array) -> bool:
+	# component_key_set contains rel:// slot keys too — O(1) membership.
 	# Required entries may be a single slot key or an OR-group of compatible keys.
 	for rel_key in required_rel_keys:
 		if rel_key is Array:
 			var has_any := false
 			for candidate in rel_key:
-				if relationship_types.has(candidate):
+				if component_key_set.has(candidate):
 					has_any = true
 					break
 			if not has_any:
 				return false
-		elif not relationship_types.has(rel_key):
+		elif not component_key_set.has(rel_key):
 			return false
 
 	# Excluded entries may also be OR-groups; any matching key excludes the archetype.
 	for rel_key in excluded_rel_keys:
 		if rel_key is Array:
 			for candidate in rel_key:
-				if relationship_types.has(candidate):
+				if component_key_set.has(candidate):
 					return false
-		elif relationship_types.has(rel_key):
+		elif component_key_set.has(rel_key):
 			return false
 	return true
 

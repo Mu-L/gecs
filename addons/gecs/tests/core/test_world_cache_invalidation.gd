@@ -144,9 +144,9 @@ func test_cache_invalidation_signal_emission():
 
 	var initial_count = signal_count[0]
 
-	# Test if signals are properly connected
-	assert_bool(entity.component_added.is_connected(world._on_entity_component_added)).is_true()
-	assert_bool(entity.component_removed.is_connected(world._on_entity_component_removed)).is_true()
+	# Since v9 the world is notified via the entity._world backref (direct calls),
+	# not signal subscriptions — verify tracking is wired instead.
+	assert_object(entity._world).is_same(world)
 
 	# Each component operation should emit signal (may be multiple due to archetype creation)
 	entity.add_component(C_TestA.new())

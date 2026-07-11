@@ -303,3 +303,47 @@ func test_query_with_relationship_wildcard(scale: int, test_parameters := [[100]
 	PerfHelpers.record_result("relationship_query_wildcard", scale, time_ms)
 
 	world.purge(false)
+
+
+## Combined component + relationship query (exact target and wildcard) —
+## the shape real gameplay queries take; previously unbenchmarked.
+func test_combined_rel_component_query(scale: int, test_parameters := [[100], [1000], [10000]]):
+	var target = Entity.new()
+	target.name = "ComboTarget"
+	world.add_entity(target, null, false)
+
+	for i in scale:
+		var entity = Entity.new()
+		entity.name = "ComboEntity_%d" % i
+		entity.add_component(C_TestA.new())
+		if i % 2 == 0:
+			entity.add_component(C_TestB.new())
+		world.add_entity(entity, null, false)
+		if i % 3 == 0:
+			entity.add_relationship(Relationship.new(C_TestC.new(), target))
+
+	var exact_time = PerfHelpers.time_it(
+		func():
+			var _result = (
+				world
+				. query
+				. with_all([C_TestA, C_TestB])
+				. with_relationship([Relationship.new(C_TestC.new(), target)])
+				. execute()
+			)
+	)
+	PerfHelpers.record_result("combined_rel_component_query_exact", scale, exact_time)
+
+	var wildcard_time = PerfHelpers.time_it(
+		func():
+			var _result = (
+				world
+				. query
+				. with_all([C_TestA, C_TestB])
+				. with_relationship([Relationship.new(C_TestC.new(), null)])
+				. execute()
+			)
+	)
+	PerfHelpers.record_result("combined_rel_component_query_wildcard", scale, wildcard_time)
+
+	world.purge(false)

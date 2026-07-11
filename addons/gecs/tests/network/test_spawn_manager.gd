@@ -67,7 +67,7 @@ class MockNetworkSync:
 		spawn_rpc_calls.append(data)
 
 	# Called by SpawnManager to broadcast a despawn to all peers
-	func rpc_broadcast_despawn(entity_id: String, session_id: int) -> void:
+	func rpc_broadcast_despawn(entity_id: int, session_id: int) -> void:
 		despawn_rpc_calls.append({"entity_id": entity_id, "session_id": session_id})
 
 
@@ -111,7 +111,7 @@ func test_deferred_broadcast_on_entity_added():
 	manager = SpawnManager.new(mock_ns)
 
 	var entity = Entity.new()
-	entity.id = "net-entity-1"
+	entity.id = 101
 	entity.name = "NetworkedEntity"
 	entity.add_component(CN_NetworkIdentity.new(0))
 	world.add_entity(entity)
@@ -132,7 +132,7 @@ func test_broadcast_pending_cancellation():
 	manager = SpawnManager.new(mock_ns)
 
 	var entity = Entity.new()
-	entity.id = "net-entity-2"
+	entity.id = 102
 	entity.name = "CancelledEntity"
 	entity.add_component(CN_NetworkIdentity.new(0))
 	world.add_entity(entity)
@@ -159,13 +159,13 @@ func test_serialize_world_state():
 	manager = SpawnManager.new(mock_ns)
 
 	var networked = Entity.new()
-	networked.id = "net-1"
+	networked.id = 201
 	networked.name = "NetworkedEntity"
 	networked.add_component(CN_NetworkIdentity.new(0))
 	world.add_entity(networked)
 
 	var local_entity = Entity.new()
-	local_entity.id = "local-1"
+	local_entity.id = 202
 	local_entity.name = "LocalEntity"
 	world.add_entity(local_entity)
 
@@ -187,7 +187,7 @@ func test_rejects_stale_session_id():
 	manager = SpawnManager.new(mock_ns)
 
 	var stale_data = {
-		"id": "stale-entity-1",
+		"id": 301,
 		"name": "StaleEntity",
 		"session_id": 999,  # Wrong session ID
 		"components": {},
@@ -210,28 +210,28 @@ func test_peer_disconnect_cleanup():
 	manager = SpawnManager.new(mock_ns)
 
 	var peer2_entity_a = Entity.new()
-	peer2_entity_a.id = "peer2-a"
+	peer2_entity_a.id = 401
 	peer2_entity_a.name = "Peer2EntityA"
 	peer2_entity_a.add_component(CN_NetworkIdentity.new(2))
 	world.add_entity(peer2_entity_a)
 
 	var peer2_entity_b = Entity.new()
-	peer2_entity_b.id = "peer2-b"
+	peer2_entity_b.id = 402
 	peer2_entity_b.name = "Peer2EntityB"
 	peer2_entity_b.add_component(CN_NetworkIdentity.new(2))
 	world.add_entity(peer2_entity_b)
 
 	var peer3_entity = Entity.new()
-	peer3_entity.id = "peer3-c"
+	peer3_entity.id = 403
 	peer3_entity.name = "Peer3Entity"
 	peer3_entity.add_component(CN_NetworkIdentity.new(3))
 	world.add_entity(peer3_entity)
 
 	manager.on_peer_disconnected(2)
 
-	assert_bool(world.entity_id_registry.has("peer2-a")).is_false()
-	assert_bool(world.entity_id_registry.has("peer2-b")).is_false()
-	assert_bool(world.entity_id_registry.has("peer3-c")).is_true()
+	assert_bool(world.entity_id_registry.has(401)).is_false()
+	assert_bool(world.entity_id_registry.has(402)).is_false()
+	assert_bool(world.entity_id_registry.has(403)).is_true()
 
 
 # ============================================================================
@@ -245,7 +245,7 @@ func test_deferred_broadcast_not_sent_if_entity_removed_same_frame():
 	manager = SpawnManager.new(mock_ns)
 
 	var entity = Entity.new()
-	entity.id = "transient-entity-1"
+	entity.id = 501
 	entity.name = "TransientEntity"
 	entity.add_component(CN_NetworkIdentity.new(0))
 	world.add_entity(entity)
@@ -274,7 +274,7 @@ func test_apply_component_data_scans_cn_net_sync():
 
 	# Create entity with CN_NetSync + a syncable component
 	var entity = Entity.new()
-	entity.id = "e_scan_test"
+	entity.id = 601
 	entity.name = "ScanEntity"
 	world.add_entity(entity)
 
@@ -293,7 +293,7 @@ func test_apply_component_data_scans_cn_net_sync():
 		manager
 		.handle_spawn_entity(
 			{
-				"id": "e_scan_test",
+				"id": 601,
 				"name": "ScanEntity",
 				"scene_path": "",
 				"components": {},
@@ -321,7 +321,7 @@ func test_serialize_entity_includes_relationships_key():
 	manager = SpawnManager.new(mock_ns)
 
 	var entity = Entity.new()
-	entity.id = "e1"
+	entity.id = 701
 	entity.name = "RelEntity"
 	entity.add_component(CN_NetworkIdentity.new(0))
 	world.add_entity(entity)
@@ -339,7 +339,7 @@ func test_handle_spawn_entity_applies_relationships():
 	manager = SpawnManager.new(mock_ns)
 
 	var spawn_data = {
-		"id": "e_rel_test",
+		"id": 801,
 		"name": "RelEntity",
 		"scene_path": "",
 		"components": {},
@@ -351,4 +351,4 @@ func test_handle_spawn_entity_applies_relationships():
 	manager.handle_spawn_entity(spawn_data)
 
 	# Entity must have been added to the world
-	assert_bool(mock_ns._world.entity_id_registry.has("e_rel_test")).is_true()
+	assert_bool(mock_ns._world.entity_id_registry.has(801)).is_true()

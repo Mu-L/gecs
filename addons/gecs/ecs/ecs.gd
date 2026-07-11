@@ -69,6 +69,45 @@ static func _resolve_debug_mode() -> bool:
 	return ProjectSettings.get_setting(GecsSettings.SETTINGS_DEBUG_MODE, false)
 
 
+func _ready() -> void:
+	if not debug:
+		return
+	# Register the gecs capture ONCE at process scope so it survives World swaps
+	# (the old per-World registration leaked to a freed object after the first swap).
+	if (
+		not Engine.is_editor_hint()
+		and OS.has_feature("editor")
+		and not EngineDebugger.has_capture("gecs")
+	):
+		EngineDebugger.register_message_capture("gecs", _on_debugger_message)
+	GECSEditorDebuggerMessages.refresh_attached()
+	# Announce presence so an already-open GECS tab replies with a subscription.
+	GECSEditorDebuggerMessages.ready()
+
+
+## Editor -> game control channel (the "gecs:" capture). Handles subscription
+## lifecycle here; forwards everything else to the active World.
+func _on_debugger_message(message: String, data: Array) -> bool:
+	match message:
+		"subscribe":
+			var categories: Dictionary = (
+				data[0] if data.size() > 0 and data[0] is Dictionary else {}
+			)
+			var hz: float = float(data[1]) if data.size() > 1 else 10.0
+			GECSEditorDebuggerMessages.apply_subscription(categories, hz)
+			# Replay current state so the tab is populated immediately.
+			if is_instance_valid(world):
+				world._send_debugger_snapshot()
+			return true
+		"unsubscribe":
+			GECSEditorDebuggerMessages.clear_subscription()
+			return true
+		_:
+			if is_instance_valid(world):
+				return world._handle_debugger_message(message, data)
+			return false
+
+
 ## This is an array of functions that get called on the entities when they get added to the world (after they are ready)
 var entity_preprocessors: Array[Callable] = []
 ## This is an array of functions that get called on the entities right before they get removed from the world

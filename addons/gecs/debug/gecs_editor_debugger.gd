@@ -100,6 +100,18 @@ func _capture(message: String, data: Array, session_id: int) -> bool:
 		# data: [Entity, Component, property_name, old_value, new_value]
 		debugger_tab.entity_component_property_changed(data[0], data[1], data[2], data[3], data[4])
 		return true
+	elif message == Msg.ENTITY_COMPONENTS_SYNCED:
+		# data: [entity_id, comp_ids]
+		debugger_tab.entity_components_synced(data[0], data[1])
+		return true
+	elif message == Msg.ENTITY_QUERY_RESULT:
+		# data: [entity_ids, error]
+		debugger_tab.entity_query_result(data[0], data[1])
+		return true
+	elif message == Msg.READY:
+		# The game announced it has GECS: reply with a subscription.
+		debugger_tab.on_game_ready()
+		return true
 	return false
 
 
@@ -123,6 +135,9 @@ func _on_session_started():
 	print("GECS Debug Session started")
 	debugger_tab.clear_all_data()
 	debugger_tab.active = true
+	# Fallback subscribe: if the game already emitted its READY before this session
+	# was wired up, subscribe now anyway (the game handles it idempotently).
+	debugger_tab.on_game_ready()
 
 
 func _on_session_stopped():

@@ -323,7 +323,7 @@ func _deferred_refresh_visibility() -> void:
 
 ## Called deferred by SpawnManager.on_entity_added after all components are set.
 ## Validates the entity is still pending and still valid before broadcasting.
-func _deferred_broadcast(entity: Entity, entity_id: String) -> void:
+func _deferred_broadcast(entity: Entity, entity_id: int) -> void:
 	if not is_instance_valid(entity):
 		_broadcast_pending.erase(entity_id)
 		return
@@ -347,7 +347,7 @@ func _deferred_broadcast(entity: Entity, entity_id: String) -> void:
 
 ## Called directly by SpawnManager.on_entity_removed to broadcast a despawn.
 ## Public so SpawnManager (a RefCounted) can call it via the _ns reference.
-func rpc_broadcast_despawn(entity_id: String, session_id: int) -> void:
+func rpc_broadcast_despawn(entity_id: int, session_id: int) -> void:
 	_despawn_entity.rpc(entity_id, session_id)
 
 
@@ -389,7 +389,7 @@ func _spawn_entity(data: Dictionary) -> void:
 
 
 @rpc("authority", "reliable")
-func _despawn_entity(entity_id: String, session_id: int) -> void:
+func _despawn_entity(entity_id: int, session_id: int) -> void:
 	if _spawn_manager == null:
 		return
 	_spawn_manager.handle_despawn_entity(entity_id, session_id)
