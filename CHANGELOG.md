@@ -1,5 +1,57 @@
 # GECS Changelog
 
+## [9.1.0] - 2026-07-10 - Debugger instrumentation overhaul
+
+The v9 performance line made the simulation fast; this release gives the editor
+debugger the same treatment. With `gecs/settings/debug_mode = true`, the runtime
+now produces **nothing** until the GECS editor tab actually subscribes — the
+per-`world.process()` instrumentation cost drops from **~20 ms/call to ~0.009 ms/call**
+(1000 entities, one no-match system, headless), matching debug-off. Attached cost
+is bounded by sampling telemetry at the tab's chosen rate instead of every frame.
+
+### Added
+
+- **Subscription handshake over the existing `gecs` capture channel.** On start the
+  game sends `gecs:ready`; the editor tab replies with `gecs:subscribe` carrying
+  per-category flags and a telemetry sample rate. The game only builds and sends what
+  a live, subscribed tab asked for. On subscribe the game replays a full state
+  snapshot (`World._send_debugger_snapshot()`) so the tab populates immediately.
+- **Category toggles in the debugger tab** — Lifecycle (entity/component/relationship
+  events), Property changes, and System metrics can each be enabled/disabled live, plus
+  a metrics sample-rate (Hz) control. The game produces only the enabled categories.
+- **`World.perf_instrumentation`** opt-in flag. The per-query `perf_mark` timing
+  (which nothing in the framework consumed) is now off even when `debug_mode` is on;
+  profiling tooling sets this flag explicitly before reading `perf_get_frame_metrics()`.
+- **New tests**: `tests/debug/test_debugger_gating.gd` (no builds/sends when unattached;
+  full flow when attached) and `tests/debug/test_debugger_subscription.gd` (handshake,
+  category flags, snapshot, reset-metrics routing), via a test-sink seam on
+  `GECSEditorDebuggerMessages`.
+
+### Changed
+
+- **Per-system telemetry is sampled/throttled** to the tab's subscribed Hz rather than
+  emitted every frame per system.
+- **System debug name is cached once** at `_internal_setup()` — the per-frame
+  `get_script().resource_path.get_file().get_basename()` string work in `System._handle`
+  is gone. `lastRunData` building remains gated on `ECS.debug` (it is a documented
+  user-facing debug feature); only the debugger *send* is gated on an attached subscription.
+- **The `gecs` message capture is registered once on the `ECS` autoload** (process
+  lifetime) instead of per-`World`.
+
+### Fixed
+
+- **~20 ms/`world.process()` instrumentation cost with `debug_mode` on and no debugger
+  attached** — every message send hit an engine `Capture not registered: 'gecs'` error
+  (I/O) several times per frame. Sends are now gated on a live subscription; the error
+  spam is gone.
+- **Reset Metrics button did nothing.** The tab sent a bare `reset_system_metrics`; the
+  game-side capture routing requires the `gecs:` prefix, so the message never arrived.
+  Now sends `gecs:reset_system_metrics`.
+- **Debugger capture leaked to a freed `World` after a world swap.** Registration was
+  bound to a `World` instance method and guarded by `has_capture`, so once that world
+  was freed no new world ever re-registered. Moving registration to the `ECS` autoload
+  fixes it; editor→game world ops are forwarded to the current `ECS.world`.
+
 ## [8.0.0] - 2026-04-21 - Observer API overhaul
 
 ### Breaking Changes
