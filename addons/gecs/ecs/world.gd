@@ -169,6 +169,16 @@ var _iteration_depth: int = 0
 var _archetype_explosion_warned: bool = false
 ## Frame + accumulated performance metrics (debug-only)
 var _perf_metrics := {"frame": {}, "accum": {}}  # Per-frame aggregated timings  # Long-lived totals (cleared manually)
+## Opt-in query-timing instrumentation. Even with ECS.debug on, [method perf_mark]
+## and its per-query timestamp reads stay off unless this is set — nothing in the
+## framework consumes the aggregates, so profiling tooling enables it explicitly
+## before reading [method perf_get_frame_metrics] / [method perf_get_accum_metrics].
+var perf_instrumentation: bool = false
+## Per-group accumulated seconds since the last telemetry sample. Telemetry to the
+## debugger is throttled to the subscribed rate (GECSEditorDebuggerMessages
+## .telemetry_interval) instead of firing every frame — peaks are preserved by the
+## runtime-side min/max/avg aggregation in System, which runs every frame regardless.
+var _telemetry_accum: Dictionary = {}
 ## Queue of systems waiting for setup after ECS.world is assigned
 var _deferred_setup_systems: Array[System] = []
 ## Per-group unique SystemTimers to advance each frame (rebuilt lazily when _timers_dirty)
@@ -179,7 +189,7 @@ var _timers_dirty: bool = true
 
 ## Internal perf helper (debug only)
 func perf_mark(key: String, duration_usec: int, extra: Dictionary = {}) -> void:
-	if not ECS.debug:
+	if not (ECS.debug and perf_instrumentation):
 		return
 	# Aggregate per frame
 	var entry = _perf_metrics.frame.get(key, {"count": 0, "time_usec": 0})
@@ -198,7 +208,7 @@ func perf_mark(key: String, duration_usec: int, extra: Dictionary = {}) -> void:
 
 ## Reset per-frame metrics (called at world.process start)
 func perf_reset_frame() -> void:
-	if ECS.debug:
+	if ECS.debug and perf_instrumentation:
 		_perf_metrics.frame.clear()
 
 
@@ -214,7 +224,7 @@ func perf_get_accum_metrics() -> Dictionary:
 
 ## Reset accumulated metrics
 func perf_reset_accum() -> void:
-	if ECS.debug:
+	if ECS.debug and perf_instrumentation:
 		_perf_metrics.accum.clear()
 
 
@@ -273,14 +283,14 @@ func initialize():
 	_worldLogger.debug("_initialize Added Entities from Scene Tree: ", _entities)
 
 	if ECS.debug:
-		assert(GECSEditorDebuggerMessages.world_init(self), "")
-		# Register debugger message handler for entity polling
-		if (
-			not Engine.is_editor_hint()
-			and OS.has_feature("editor")
-			and not EngineDebugger.has_capture("gecs")
-		):
-			EngineDebugger.register_message_capture("gecs", _handle_debugger_message)
+		# The gecs capture is registered once on the ECS autoload (ECS._ready) so it
+		# survives world swaps. Re-resolve the transport, then announce this world:
+		# READY lets a late-connecting tab (re)subscribe, and world_init hands the tab
+		# a fresh world context if we are already subscribed.
+		GECSEditorDebuggerMessages.refresh_attached()
+		GECSEditorDebuggerMessages.ready()
+		if GECSEditorDebuggerMessages.attached:
+			assert(GECSEditorDebuggerMessages.world_init(self), "")
 
 
 ## Finalize deferred system setup after ECS.world is set.
@@ -316,6 +326,20 @@ func finalize_system_setup() -> void:
 func process(delta: float, group: String = "") -> void:
 	# PERF: Reset frame metrics at start of processing step
 	perf_reset_frame()
+	# Decide once whether this frame emits a telemetry sample. Throttled to the
+	# subscribed rate so an attached tab doesn't cost a full per-system message set
+	# every frame (min/max/avg still aggregate every frame inside System._handle).
+	var telemetry_due := false
+	if (
+		ECS.debug
+		and GECSEditorDebuggerMessages.attached
+		and GECSEditorDebuggerMessages.telemetry_active
+	):
+		var acc: float = _telemetry_accum.get(group, 0.0) + delta
+		if acc >= GECSEditorDebuggerMessages.telemetry_interval:
+			telemetry_due = true
+			acc = 0.0
+		_telemetry_accum[group] = acc
 	if systems_by_group.has(group):
 		# Advance all unique timers for this group BEFORE running systems
 		if _timers_dirty:
@@ -327,7 +351,7 @@ func process(delta: float, group: String = "") -> void:
 		for system in systems_by_group[group]:
 			if system.active:
 				system._handle(delta)
-				if ECS.debug:
+				if telemetry_due:
 					# Add execution order to last run data
 					system.lastRunData["execution_order"] = system_index
 					assert(
@@ -343,7 +367,7 @@ func process(delta: float, group: String = "") -> void:
 				and system.has_pending_commands()
 			):
 				system.cmd.execute()
-	if ECS.debug:
+	if telemetry_due:
 		assert(GECSEditorDebuggerMessages.process_world(delta, group), "")
 
 
@@ -478,7 +502,7 @@ func add_entity(entity: Entity, components = null, add_to_tree = true) -> void:
 	for processor in ECS.entity_preprocessors:
 		processor.call(entity)
 
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.entity_added(entity, add_to_tree), "")
 
 
@@ -572,7 +596,7 @@ func remove_entity(entity: Entity) -> void:
 	_remove_entity_from_archetype(entity)
 
 	# Notify debugger before freeing (entity must still be valid)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		var path = entity.get_path() if entity.is_inside_tree() else str(entity)
 		assert(GECSEditorDebuggerMessages.entity_removed(entity.get_instance_id(), path), "")
 
@@ -616,7 +640,7 @@ func disable_entity(entity) -> Entity:
 	entity.on_disable()
 	entity.set_process(false)
 	entity.set_physics_process(false)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.entity_disabled(entity), "")
 	return entity
 
@@ -659,7 +683,7 @@ func enable_entity(entity: Entity, components = null) -> void:
 	entity.set_process(true)
 	entity.set_physics_process(true)
 	entity.on_enable()
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.entity_enabled(entity), "")
 
 
@@ -737,7 +761,7 @@ func add_system(system: System, topo_sort: bool = false) -> void:
 
 	if topo_sort:
 		ArrayExtensions.topological_sort(systems_by_group)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.system_added(system), "")
 
 
@@ -770,7 +794,7 @@ func remove_system(system, topo_sort: bool = false) -> void:
 	system.queue_free()
 	if topo_sort:
 		ArrayExtensions.topological_sort(systems_by_group)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.system_removed(system), "")
 
 
@@ -930,7 +954,7 @@ func _on_entity_component_added(entity: Entity, component: Resource) -> void:
 	):
 		_evaluate_monitors_for_entity(entity, component.get_script().resource_path)
 	# (Property changes arrive via the entity's direct _world call — no signal hop.)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.entity_component_added(entity, component), "")
 
 
@@ -965,7 +989,7 @@ func _on_entity_component_property_change(
 		_evaluate_monitors_for_entity(entity, component.get_script().resource_path)
 	# ARCHETYPE: No cache invalidation - property changes don't affect archetype membership
 	# Send the message to the debugger if we're in debug
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.property_changes_active:
 		assert(
 			(
 				GECSEditorDebuggerMessages
@@ -1010,7 +1034,7 @@ func _on_entity_component_removed(entity, component: Resource) -> void:
 		and component.get_script() != null
 	):
 		_evaluate_monitors_for_entity(entity, component.get_script().resource_path)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.entity_component_removed(entity, component), "")
 
 
@@ -1037,7 +1061,7 @@ func _on_entity_relationship_added(entity: Entity, relationship: Relationship) -
 		var rel_path_added = _get_relationship_relation_path(relationship)
 		if rel_path_added != "":
 			_evaluate_monitors_for_entity(entity, rel_path_added)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.entity_relationship_added(entity, relationship), "")
 
 
@@ -1066,7 +1090,7 @@ func _on_entity_relationship_removed(entity: Entity, relationship: Relationship)
 			_bump_membership("entity_relationship_removed")
 
 	relationship_removed.emit(entity, relationship)
-	if ECS.debug:
+	if ECS.debug and GECSEditorDebuggerMessages.attached and GECSEditorDebuggerMessages.lifecycle_active:
 		assert(GECSEditorDebuggerMessages.entity_relationship_removed(entity, relationship), "")
 
 
@@ -1865,8 +1889,10 @@ func _query(
 	ex_rel_slot_keys: Array = [],
 	wildcard_ex_rel_types: Array = [],
 ) -> Array:
+	# Opt-in query timing; off unless perf tooling enabled it (see perf_instrumentation).
+	var _perf := ECS.debug and perf_instrumentation
 	var _perf_start_total := 0
-	if ECS.debug:
+	if _perf:
 		_perf_start_total = Time.get_ticks_usec()
 	# Early return if no components and no structural relationships specified - return all entities
 	if (
@@ -1879,7 +1905,7 @@ func _query(
 		and wildcard_ex_rel_types.is_empty()
 	):
 		if enabled_filter == null:
-			if ECS.debug:
+			if _perf:
 				perf_mark(
 					"query_all_entities",
 					Time.get_ticks_usec() - _perf_start_total,
@@ -1891,7 +1917,7 @@ func _query(
 			var filtered: Array[Entity] = []
 			for archetype in archetypes.values():
 				filtered.append_array(archetype.get_entities_by_enabled_state(enabled_filter))
-			if ECS.debug:
+			if _perf:
 				perf_mark(
 					"query_all_entities_filtered",
 					Time.get_ticks_usec() - _perf_start_total,
@@ -1901,14 +1927,14 @@ func _query(
 
 	# OPTIMIZATION: Use pre-calculated cache key if provided (avoids hash recalculation)
 	var _perf_start_cache_key := 0
-	if ECS.debug:
+	if _perf:
 		_perf_start_cache_key = Time.get_ticks_usec()
 	var cache_key = (
 		precalculated_cache_key
 		if precalculated_cache_key != -1
 		else QueryCacheKey.build(all_components, any_components, exclude_components)
 	)
-	if ECS.debug:
+	if _perf:
 		perf_mark("query_cache_key", Time.get_ticks_usec() - _perf_start_cache_key)
 
 	# Check if we have cached matching archetypes for this query
@@ -1916,12 +1942,12 @@ func _query(
 	if _query_archetype_cache.has(cache_key):
 		_cache_hits += 1
 		matching_archetypes = _query_archetype_cache[cache_key]
-		if ECS.debug:
+		if _perf:
 			perf_mark("query_cache_hit", 0, {"archetypes": matching_archetypes.size()})
 	else:
 		_cache_misses += 1
 		var _perf_start_scan := 0
-		if ECS.debug:
+		if _perf:
 			_perf_start_scan = Time.get_ticks_usec()
 		# Find all archetypes that match this query
 		var map_to_key = func(x): return x.get_instance_id()
@@ -1965,7 +1991,7 @@ func _query(
 			wildcard_rel_types.duplicate(),
 			wildcard_ex_rel_types.duplicate(),
 		]
-		if ECS.debug:
+		if _perf:
 			perf_mark(
 				"query_archetype_scan",
 				Time.get_ticks_usec() - _perf_start_scan,
@@ -1975,7 +2001,7 @@ func _query(
 	# OPTIMIZATION: If there's only ONE matching archetype with no filtering, return it directly
 	# This avoids array allocation and copying for the common case
 	if matching_archetypes.size() == 1 and enabled_filter == null:
-		if ECS.debug:
+		if _perf:
 			perf_mark(
 				"query_single_archetype",
 				Time.get_ticks_usec() - _perf_start_total,
@@ -1985,7 +2011,7 @@ func _query(
 
 	# Collect entities from all matching archetypes with enabled filtering if needed
 	var _perf_start_flatten := 0
-	if ECS.debug:
+	if _perf:
 		_perf_start_flatten = Time.get_ticks_usec()
 	var result: Array[Entity] = []
 	for archetype in matching_archetypes:
@@ -1995,7 +2021,7 @@ func _query(
 		else:
 			# OPTIMIZATION: Use bitset filtering instead of per-entity enabled check
 			result.append_array(archetype.get_entities_by_enabled_state(enabled_filter))
-	if ECS.debug:
+	if _perf:
 		perf_mark(
 			"query_flatten",
 			Time.get_ticks_usec() - _perf_start_flatten,
@@ -2052,8 +2078,10 @@ func group_entities_by_archetype(entities: Array) -> Dictionary:
 ##             # Process with cache-friendly column access
 ## [/codeblock]
 func get_matching_archetypes(query_builder: QueryBuilder) -> Array[Archetype]:
+	# Opt-in query timing; off unless perf tooling enabled it (see perf_instrumentation).
+	var _perf := ECS.debug and perf_instrumentation
 	var _perf_start := 0
-	if ECS.debug:
+	if _perf:
 		_perf_start = Time.get_ticks_usec()
 	var all_components = query_builder._all_components
 	var any_components = query_builder._any_components
@@ -2069,7 +2097,7 @@ func get_matching_archetypes(query_builder: QueryBuilder) -> Array[Archetype]:
 	var cache_key = query_builder.get_cache_key()
 
 	if _query_archetype_cache.has(cache_key):
-		if ECS.debug:
+		if _perf:
 			perf_mark("archetypes_cache_hit", Time.get_ticks_usec() - _perf_start)
 		return _query_archetype_cache[cache_key]
 
@@ -2080,7 +2108,7 @@ func get_matching_archetypes(query_builder: QueryBuilder) -> Array[Archetype]:
 
 	var matching: Array[Archetype] = []
 	var _perf_scan_start := 0
-	if ECS.debug:
+	if _perf:
 		_perf_scan_start = Time.get_ticks_usec()
 	# Determine candidate archetypes: use wildcard index if available
 	var candidates: Array = []
@@ -2104,7 +2132,7 @@ func get_matching_archetypes(query_builder: QueryBuilder) -> Array[Archetype]:
 				):
 					continue
 			matching.append(archetype)
-	if ECS.debug:
+	if _perf:
 		perf_mark(
 			"archetypes_scan",
 			Time.get_ticks_usec() - _perf_scan_start,
@@ -2121,7 +2149,7 @@ func get_matching_archetypes(query_builder: QueryBuilder) -> Array[Archetype]:
 		wildcard_rel_types.duplicate(),
 		wildcard_ex_rel_types.duplicate(),
 	]
-	if ECS.debug:
+	if _perf:
 		perf_mark(
 			"archetypes_total",
 			Time.get_ticks_usec() - _perf_start,
@@ -2921,17 +2949,11 @@ func _handle_debugger_message(message: String, data: Array) -> bool:
 	elif message == "select_entity":
 		# Editor requested to select an entity in the scene tree
 		var entity_path = data[0]
-		print("GECS World: Received select_entity request for path: ", entity_path)
 		# Get the actual node to get its ObjectID
 		var node = get_node_or_null(entity_path)
 		if node:
 			var obj_id = node.get_instance_id()
 			var _class_name = node.get_class()
-			# The path needs to be an array of node names from root to target
-			var path_array = str(entity_path).split("/", false)
-			print("  Found node, sending inspect message")
-			print("    ObjectID: ", obj_id)
-			print("    Class: ", _class_name)
 
 			if GECSEditorDebuggerMessages.can_send_message():
 				# The scene:inspect_object format per Godot source code:
@@ -2964,32 +2986,22 @@ func _handle_debugger_message(message: String, data: Array) -> bool:
 
 				# Message format: [object_id, class_name, properties] - only 3 elements!
 				var msg_data: Array = [obj_id, _class_name, properties]
-				print(
-					"    Sending scene:inspect_object: [",
-					obj_id,
-					", ",
-					_class_name,
-					", ",
-					properties.size(),
-					" props]",
-				)
 				EngineDebugger.send_message("scene:inspect_object", msg_data)
 		else:
-			print("  ERROR: Could not find node at path: ", entity_path)
+			push_error("GECS: select_entity could not find node at path: ", entity_path)
 		return true
 	return false
 
 
 ## Poll a specific entity's components and send updates to the debugger
 func _poll_entity_for_debugger(entity_id: int) -> void:
-	# Find the entity by instance ID
-	var entity: Entity = null
-	for ent in entities:
-		if ent.get_instance_id() == entity_id:
-			entity = ent
-			break
-
-	if entity == null:
+	# Resolve the entity directly by its instance id instead of scanning all entities.
+	var obj = instance_from_id(entity_id)
+	if not (obj is Entity):
+		return
+	var entity: Entity = obj
+	# Only poll entities this world actually owns.
+	if not entity_to_archetype.has(entity):
 		return
 
 	# Re-send all component data with fresh serialize() calls
@@ -2998,5 +3010,37 @@ func _poll_entity_for_debugger(entity_id: int) -> void:
 		if comp and comp is Resource:
 			# Send updated component data
 			GECSEditorDebuggerMessages.entity_component_added(entity, comp)
+
+
+## Replay the full current world state to a tab that just subscribed. Without this,
+## a tab attaching after entities already exist would only ever see entities added
+## later (lifecycle events are edge-triggered). Called from ECS._on_debugger_message
+## when a subscription enables the lifecycle category.
+## NOTE: sends one message per system + per entity + per component/relationship. On a
+## very large world this can approach the debugger's queued-message cap
+## (project setting network/limits/debugger/max_queued_messages, default 2048);
+## Phase 3 can chunk this across frames if that becomes a problem in practice.
+func _send_debugger_snapshot() -> void:
+	if not (ECS.debug and GECSEditorDebuggerMessages.attached):
+		return
+	# Re-establish the world context on the freshly-cleared tab.
+	assert(GECSEditorDebuggerMessages.world_init(self), "")
+	# Systems always accompany a snapshot (the systems panel keys off system_added).
+	for system in systems:
+		if is_instance_valid(system):
+			assert(GECSEditorDebuggerMessages.system_added(system), "")
+	# Entity/component/relationship state only when the lifecycle category is on.
+	if GECSEditorDebuggerMessages.lifecycle_active:
+		for entity in entities:
+			if not is_instance_valid(entity):
+				continue
+			assert(GECSEditorDebuggerMessages.entity_added(entity, entity.is_inside_tree()), "")
+			for comp_key in entity.components.keys():
+				var comp = entity.components[comp_key]
+				if comp and comp is Resource:
+					assert(GECSEditorDebuggerMessages.entity_component_added(entity, comp), "")
+			for rel in entity.relationships:
+				if rel:
+					assert(GECSEditorDebuggerMessages.entity_relationship_added(entity, rel), "")
 
 #endregion Debugger Support

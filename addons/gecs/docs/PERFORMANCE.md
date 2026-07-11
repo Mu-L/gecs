@@ -111,10 +111,26 @@ because untouched archetypes are skipped with one int compare.
 Guarded fast paths (must-not-regress): cached query execute, `get/has_component`,
 per-entity iteration, exact relationship queries — all flat-to-better.
 
-Debug-mode note: `gecs/settings/debug_mode = true` costs ~20 ms per
-`world.process()` call in instrumentation alone (measured identical on v8 and
-v9). Benchmark and ship with it off; enable only while using the GECS debugger
-tab.
+Debug-mode note: `gecs/settings/debug_mode = true` used to cost a flat ~20 ms per
+`world.process()` call in instrumentation alone — even with no debugger attached.
+As of the debugger overhaul it is **near-zero when unattached** and **bounded when
+attached**:
+
+- **Unattached** (headless, or the editor's GECS tab not subscribed): the game
+  builds no debugger payloads and sends nothing. The per-process overhead is within
+  ~0.3 ms per 100 calls of debug-off. The gate is a single static-bool read
+  (`GECSEditorDebuggerMessages.attached`) inside the existing `if ECS.debug:`
+  release-strip guards.
+- **Attached**: per-system telemetry is throttled to the tab's subscribed rate
+  (default 10 Hz) rather than every frame; runtime-side min/max/avg aggregation
+  still runs every frame so peaks are never lost. Lifecycle/property categories can
+  be turned off from the tab to shed more cost.
+
+Query-timing instrumentation (`world.perf_mark`, the `query_*`/`archetypes_*`
+aggregates) is **opt-in** and off by default even with debug on — nothing in the
+framework consumes it. Set `world.perf_instrumentation = true` before reading
+`world.perf_get_frame_metrics()` / `perf_get_accum_metrics()` when profiling
+queries.
 
 ## Benchmarking
 

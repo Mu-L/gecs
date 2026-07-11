@@ -115,6 +115,10 @@ var systemLogger = GECSLogger.new().domain("System")
 ##       lastRunData["events"] = ["event1", "event2"]
 var lastRunData := {}
 
+## Cached display name for the debugger (script basename). Computed once in
+## [method _internal_setup] so [method _handle] never rebuilds it per frame.
+var _debug_name := ""
+
 ## Reference to the world this system belongs to (set by World.add_system)
 var _world: World = null
 ## Convenience property for accessing query builder (returns _world.query or ECS.world.query)
@@ -272,6 +276,11 @@ func reset_performance_metrics() -> void:
 ## INTERNAL: Called by World.add_system() to initialize the system
 ## DO NOT CALL OR OVERRIDE - this is framework code
 func _internal_setup():
+	# Cache the debugger display name once (script basename) so the per-frame
+	# hot path never recomputes it.
+	var script := get_script()
+	if script and script.resource_path:
+		_debug_name = script.resource_path.get_file().get_basename()
 	# Call user setup
 	setup()
 	# If the export flag was ticked in the inspector, register the monitor now that
@@ -432,8 +441,12 @@ func _handle(delta: float) -> void:
 	if measure_time:
 		start_time_usec = Time.get_ticks_usec()
 	if ECS.debug:
+		if _debug_name == "":
+			var script := get_script()
+			if script and script.resource_path:
+				_debug_name = script.resource_path.get_file().get_basename()
 		lastRunData = {
-			"system_name": get_script().resource_path.get_file().get_basename(),
+			"system_name": _debug_name,
 			"frame_delta": delta,
 		}
 	if _has_subsystems_cached == -1:

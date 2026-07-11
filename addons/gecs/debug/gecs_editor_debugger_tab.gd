@@ -12,6 +12,12 @@ extends Control
 @onready var systems_reset_metrics_btn: Button = %SystemsResetMetricsBtn
 @onready var pop_out_btn: Button = %PopOutBtn
 @onready var poll_rate_spin_box: SpinBox = %PollRateSpinBox
+# Capture-category toggles — each re-sends the subscription so the game only
+# produces the categories currently being viewed.
+@onready var lifecycle_check_box: CheckBox = %LifecycleCheckBox
+@onready var prop_changes_check_box: CheckBox = %PropChangesCheckBox
+@onready var metrics_check_box: CheckBox = %MetricsCheckBox
+@onready var metrics_hz_spin_box: SpinBox = %MetricsHzSpinBox
 
 var ecs_data: Dictionary = {}
 var default_system := {"path": "", "active": true, "metrics": {}, "group": ""}
@@ -157,6 +163,21 @@ func _ready() -> void:
 		systems_reset_metrics_btn.pressed.connect(_on_systems_reset_metrics_pressed)
 	if pop_out_btn and not pop_out_btn.pressed.is_connected(_on_pop_out_pressed):
 		pop_out_btn.pressed.connect(_on_pop_out_pressed)
+	# Capture-category toggles re-send the subscription on change.
+	if lifecycle_check_box and not lifecycle_check_box.toggled.is_connected(_on_category_toggled):
+		lifecycle_check_box.toggled.connect(_on_category_toggled)
+	if (
+		prop_changes_check_box
+		and not prop_changes_check_box.toggled.is_connected(_on_category_toggled)
+	):
+		prop_changes_check_box.toggled.connect(_on_category_toggled)
+	if metrics_check_box and not metrics_check_box.toggled.is_connected(_on_category_toggled):
+		metrics_check_box.toggled.connect(_on_category_toggled)
+	if (
+		metrics_hz_spin_box
+		and not metrics_hz_spin_box.value_changed.is_connected(_on_metrics_hz_changed)
+	):
+		metrics_hz_spin_box.value_changed.connect(_on_metrics_hz_changed)
 	# Connect to system tree for clicking (single click to toggle)
 	if (
 		system_tree
@@ -231,6 +252,42 @@ func send_to_game(message: String, data: Array = []) -> bool:
 		return false
 	_debugger_session.send_message(message, data)
 	return true
+
+
+## Reply to the game's READY announcement with a subscription reflecting the
+## current category toggles. The game replays a full snapshot in response so the
+## trees populate immediately.
+func on_game_ready() -> void:
+	_send_subscription()
+
+
+## Build and send the subscription from the current toggle/Hz state. Called on the
+## READY handshake and whenever a category toggle or the Hz spinner changes.
+func _send_subscription() -> void:
+	# The checkboxes may not exist yet if called before _ready(); default to on.
+	var lifecycle := lifecycle_check_box.button_pressed if lifecycle_check_box else true
+	var props := prop_changes_check_box.button_pressed if prop_changes_check_box else true
+	var metrics := metrics_check_box.button_pressed if metrics_check_box else true
+	var hz := metrics_hz_spin_box.value if metrics_hz_spin_box else 10.0
+	send_to_game(
+		"gecs:subscribe",
+		[
+			{
+				"system_metrics": metrics,
+				"entity_lifecycle": lifecycle,
+				"property_changes": props,
+			},
+			hz,
+		]
+	)
+
+
+func _on_category_toggled(_pressed: bool) -> void:
+	_send_subscription()
+
+
+func _on_metrics_hz_changed(_value: float) -> void:
+	_send_subscription()
 
 
 ## Poll only expanded entity tree items for fresh component data.
@@ -1255,7 +1312,9 @@ func system_last_run_data(system_id: int, system_name: String, last_run_data: Di
 func _on_systems_reset_metrics_pressed() -> void:
 	# Tell the runtime to clear its per-system min/max/avg aggregates. Next frame's
 	# lastRunData will arrive with sample_count=1 and the UI will rebuild from there.
-	send_to_game("reset_system_metrics", [])
+	# NOTE: the "gecs:" prefix is required — the capture strips it before the game's
+	# handler matches; without it the message never routed and this button did nothing.
+	send_to_game("gecs:reset_system_metrics", [])
 	# Optimistically clear the cached metrics so the UI doesn't show stale data
 	# while we wait for the next telemetry frame.
 	var systems_data = ecs_data.get("systems", {})
