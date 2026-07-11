@@ -174,6 +174,12 @@ var _perf_metrics := {"frame": {}, "accum": {}}  # Per-frame aggregated timings 
 ## framework consumes the aggregates, so profiling tooling enables it explicitly
 ## before reading [method perf_get_frame_metrics] / [method perf_get_accum_metrics].
 var perf_instrumentation: bool = false
+## Debugger ad-hoc query runner: name -> resource path of every global class
+## (built once, no loading) and a lazily-populated name -> loaded Script cache.
+## Only classes actually referenced in a typed query are loaded, so broken or
+## editor-only global scripts are never touched.
+var _debugger_class_paths: Dictionary = {}
+var _debugger_class_scripts: Dictionary = {}
 ## Per-group accumulated seconds since the last telemetry sample. Telemetry to the
 ## debugger is throttled to the subscribed rate (GECSEditorDebuggerMessages
 ## .telemetry_interval) instead of firing every frame — peaks are preserved by the
@@ -2946,6 +2952,10 @@ func _handle_debugger_message(message: String, data: Array) -> bool:
 		var entity_id = data[0]
 		_poll_entity_for_debugger(entity_id)
 		return true
+	elif message == "run_entity_query":
+		# Editor typed an ad-hoc QueryBuilder expression; evaluate and reply.
+		_run_debugger_query(data[0] if data.size() > 0 else "")
+		return true
 	elif message == "select_entity":
 		# Editor requested to select an entity in the scene tree
 		var entity_path = data[0]
@@ -3004,12 +3014,85 @@ func _poll_entity_for_debugger(entity_id: int) -> void:
 	if not entity_to_archetype.has(entity):
 		return
 
-	# Re-send all component data with fresh serialize() calls
+	# Re-send all component data with fresh serialize() calls, collecting the
+	# authoritative id set so the tab can prune components that are already gone.
+	var current_comp_ids: Array = []
 	for comp_key in entity.components.keys():
 		var comp = entity.components[comp_key]
 		if comp and comp is Resource:
+			current_comp_ids.append(comp.get_instance_id())
 			# Send updated component data
 			GECSEditorDebuggerMessages.entity_component_added(entity, comp)
+	# Reconcile: the tab removes any component rows not in this set. A poll is an
+	# editor-initiated pull, so it reflects true state regardless of the lifecycle
+	# event category being toggled off.
+	GECSEditorDebuggerMessages.entity_components_synced(entity_id, current_comp_ids)
+
+
+## Evaluate an ad-hoc QueryBuilder expression typed in the debugger tab and reply
+## with the matching entity ids. Uses Godot's [Expression] with a fresh [code]q[/code]
+## builder plus every global class injected as inputs, so the developer can type real
+## query code — e.g. [code]q.with_all([C_A]).with_any([C_B]).with_none([C_C])[/code].
+## Editor/dev-only (gated by ECS.debug + editor build). The expression can call methods
+## on the injected objects, which is acceptable for a developer inspecting their own game.
+func _run_debugger_query(query_text: String) -> void:
+	query_text = query_text.strip_edges()
+	if query_text == "":
+		GECSEditorDebuggerMessages.entity_query_result([], "Empty query")
+		return
+	# Build the name -> path map once (cheap; no scripts loaded here).
+	if _debugger_class_paths.is_empty():
+		for entry in ProjectSettings.get_global_class_list():
+			var cname: String = entry.get("class", "")
+			var cpath: String = entry.get("path", "")
+			if cname != "" and cpath != "":
+				_debugger_class_paths[cname] = cpath
+	# Resolve ONLY the identifiers the query text actually references — avoids
+	# loading unrelated (possibly broken or editor-only) global scripts.
+	var ident_re := RegEx.new()
+	ident_re.compile("[A-Za-z_][A-Za-z0-9_]*")
+	var input_names := PackedStringArray(["q"])
+	var inputs: Array = [query]
+	var seen := {"q": true}
+	for m in ident_re.search_all(query_text):
+		var ident := m.get_string()
+		if seen.has(ident) or not _debugger_class_paths.has(ident):
+			continue
+		seen[ident] = true
+		var scr = _debugger_class_scripts.get(ident, null)
+		if scr == null:
+			scr = load(_debugger_class_paths[ident])
+			if scr != null:
+				_debugger_class_scripts[ident] = scr
+		if scr != null:
+			input_names.append(ident)
+			inputs.append(scr)
+
+	var expr := Expression.new()
+	var perr := expr.parse(query_text, input_names)
+	if perr != OK:
+		GECSEditorDebuggerMessages.entity_query_result([], "Parse error: " + expr.get_error_text())
+		return
+	var result = expr.execute(inputs, null, false)
+	if expr.has_execute_failed():
+		GECSEditorDebuggerMessages.entity_query_result([], "Eval error: " + expr.get_error_text())
+		return
+	# Accept either a QueryBuilder (call execute()) or an already-executed Array.
+	var entities: Array = []
+	if result is QueryBuilder:
+		entities = result.execute()
+	elif result is Array:
+		entities = result
+	else:
+		GECSEditorDebuggerMessages.entity_query_result(
+			[], "Query must return a QueryBuilder or an Array of entities"
+		)
+		return
+	var ids: Array = []
+	for e in entities:
+		if is_instance_valid(e) and e is Entity:
+			ids.append(e.get_instance_id())
+	GECSEditorDebuggerMessages.entity_query_result(ids, "")
 
 
 ## Replay the full current world state to a tab that just subscribed. Without this,

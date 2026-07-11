@@ -54,6 +54,24 @@ const ICON_FLAG = "🚩"  # Flag component (no properties)
 const ICON_RELATIONSHIP = "🔗"  # Relationship icon
 const ICON_PIN = "📌"  # Pinned item icon
 
+# ---- Manual column-resize state (Godot Tree has no native drag-to-resize) ----
+const _RESIZE_GRAB_PX := 6.0
+var _resizing_tree: Tree = null
+var _resize_column: int = -1
+var _resize_start_x: float = 0.0
+var _resize_start_width: int = 0
+
+# ---- Ad-hoc query mode (entities filter box) ----
+## When true, the entities filter box is a QueryBuilder expression run in the game
+## on Enter, rather than a client-side text filter.
+var _query_mode: bool = false
+## True while a query result is filtering the tree (distinct from an empty query).
+var _query_active: bool = false
+## Set of matching entity instance ids from the last query (id -> true).
+var _query_result_ids: Dictionary = {}
+## Transient query status (match count or error) appended to the entity status bar.
+var _query_status_text: String = ""
+
 
 func _ready() -> void:
 	_update_debug_mode_overlay()
@@ -207,6 +225,21 @@ func _ready() -> void:
 	# Connect to system tree for right-click context menu
 	if system_tree and not system_tree.button_clicked.is_connected(_on_system_tree_button_clicked):
 		system_tree.button_clicked.connect(_on_system_tree_button_clicked)
+	# Manual column resizing (Godot's Tree has no built-in drag-to-resize).
+	if system_tree and not system_tree.gui_input.is_connected(_on_tree_gui_input):
+		system_tree.gui_input.connect(_on_tree_gui_input.bind(system_tree))
+	if entities_tree and not entities_tree.gui_input.is_connected(_on_tree_gui_input):
+		entities_tree.gui_input.connect(_on_tree_gui_input.bind(entities_tree))
+	# Query mode: checkbox flips the entities filter box between text-filter and
+	# running a typed QueryBuilder expression in the game (submit on Enter).
+	if query_builder_check_box and not query_builder_check_box.toggled.is_connected(
+		_on_query_mode_toggled
+	):
+		query_builder_check_box.toggled.connect(_on_query_mode_toggled)
+	if entities_filter_line_edit and not entities_filter_line_edit.text_submitted.is_connected(
+		_on_entities_query_submitted
+	):
+		entities_filter_line_edit.text_submitted.connect(_on_entities_query_submitted)
 
 
 func _process(delta: float) -> void:
@@ -309,6 +342,10 @@ func _poll_expanded_entities() -> void:
 func clear_all_data():
 	ecs_data.clear()
 	_pending_components.clear()
+	# Drop any active query filter/results from the previous session.
+	_query_active = false
+	_query_result_ids.clear()
+	_query_status_text = ""
 
 	# Clear system tree
 	if system_tree:
@@ -329,7 +366,83 @@ func clear_all_data():
 
 # ---- Filters & Refresh Helpers ----
 func _on_entities_filter_changed(new_text: String):
+	# In query mode the box holds a QueryBuilder expression that only runs on
+	# Enter — don't treat every keystroke as a text filter.
+	if _query_mode:
+		return
 	_refresh_entity_tree_filter()
+
+
+## Toggle the entities filter box between text-filter and query-expression mode.
+func _on_query_mode_toggled(pressed: bool) -> void:
+	_query_mode = pressed
+	if entities_filter_line_edit:
+		entities_filter_line_edit.placeholder_text = (
+			"q.with_all([C_A]).with_none([C_B])  (Enter to run)"
+			if pressed
+			else "Entities filter....."
+		)
+	if pressed:
+		# Leaving text-filter: show everything until a query runs.
+		_reset_entity_visibility()
+	else:
+		# Leaving query mode: drop query results and re-apply any text filter.
+		_query_active = false
+		_query_result_ids.clear()
+		_query_status_text = ""
+		_refresh_entity_tree_filter()
+	_update_entity_status_bar()
+
+
+## Submit handler for the filter box. Only meaningful in query mode (Enter runs it).
+func _on_entities_query_submitted(text: String) -> void:
+	if not _query_mode:
+		return
+	var query_text := text.strip_edges()
+	if query_text == "":
+		_query_active = false
+		_query_result_ids.clear()
+		_query_status_text = ""
+		_reset_entity_visibility()
+		_update_entity_status_bar()
+		return
+	if not send_to_game("gecs:run_entity_query", [query_text]):
+		_query_status_text = "Query: no active debug session"
+		_update_entity_status_bar()
+
+
+## Receive query results from the game and filter the tree to matching entities.
+func entity_query_result(entity_ids: Array, error: String) -> void:
+	if error != "":
+		_query_active = false
+		_query_result_ids.clear()
+		_reset_entity_visibility()
+		_query_status_text = "Query error: " + str(error)
+		_update_entity_status_bar()
+		return
+	_query_result_ids.clear()
+	for id in entity_ids:
+		_query_result_ids[id] = true
+	_query_active = true
+	# Show only matching entities.
+	if entities_tree and entities_tree.get_root():
+		var item = entities_tree.get_root().get_first_child()
+		while item:
+			var eid = item.get_meta("entity_id", null)
+			item.visible = eid != null and _query_result_ids.has(eid)
+			item = item.get_next()
+	_query_status_text = "Query matched %d entities" % entity_ids.size()
+	_update_entity_status_bar()
+
+
+## Make every top-level entity row visible (clears any active filter).
+func _reset_entity_visibility() -> void:
+	if not entities_tree or not entities_tree.get_root():
+		return
+	var item = entities_tree.get_root().get_first_child()
+	while item:
+		item.visible = true
+		item = item.get_next()
 
 
 func _on_systems_filter_changed(new_text: String):
@@ -413,7 +526,7 @@ func _on_system_tree_item_mouse_selected(position: Vector2, mouse_button_index: 
 		if mouse_button_index == MOUSE_BUTTON_LEFT:
 			# Get the column that was clicked
 			var column = system_tree.get_column_at_position(position)
-			if column == 3:  # Status column (now column 3)
+			if column == 6:  # Status column
 				_toggle_system_active()
 		elif mouse_button_index == MOUSE_BUTTON_RIGHT:
 			_show_system_context_menu(selected, position)
@@ -422,6 +535,59 @@ func _on_system_tree_item_mouse_selected(position: Vector2, mouse_button_index: 
 func _on_system_tree_button_clicked(item: TreeItem, column: int, id: int, mouse_button_index: int):
 	# Handle button clicks in tree (currently unused, but keeping for future)
 	pass
+
+
+## Emulated column resizing — Godot's Tree has no built-in drag-to-resize
+## (godot-proposals#2088). Grab a column's right edge in the title band and drag.
+func _on_tree_gui_input(event: InputEvent, tree: Tree) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			var col := _column_boundary_at(tree, event.position)
+			if col != -1:
+				_resizing_tree = tree
+				_resize_column = col
+				_resize_start_x = event.position.x
+				_resize_start_width = tree.get_column_width(col)
+				tree.accept_event()  # consume so this press doesn't sort/select
+		elif _resizing_tree == tree:
+			_resizing_tree = null
+			_resize_column = -1
+			tree.accept_event()
+	elif event is InputEventMouseMotion:
+		if _resizing_tree == tree and _resize_column != -1:
+			var new_w := int(maxf(24.0, _resize_start_width + (event.position.x - _resize_start_x)))
+			# A resized column becomes fixed-width so the custom width sticks.
+			tree.set_column_expand(_resize_column, false)
+			tree.set_column_custom_minimum_width(_resize_column, new_w)
+			tree.accept_event()
+		else:
+			# Cursor feedback when hovering a resizable boundary.
+			var hover := _column_boundary_at(tree, event.position)
+			tree.mouse_default_cursor_shape = (
+				Control.CURSOR_HSIZE if hover != -1 else Control.CURSOR_ARROW
+			)
+
+
+## Column whose RIGHT edge sits within grab distance of [param pos] (title band
+## only), else -1. [param pos] is tree-local; accounts for horizontal scroll.
+func _column_boundary_at(tree: Tree, pos: Vector2) -> int:
+	if not tree.column_titles_visible or pos.y > _tree_title_height(tree):
+		return -1
+	var x := -tree.get_scroll().x
+	for c in range(tree.columns):
+		x += tree.get_column_width(c)
+		if absf(pos.x - x) <= _RESIZE_GRAB_PX:
+			return c
+	return -1
+
+
+## Best-effort height of the clickable column-title band.
+func _tree_title_height(tree: Tree) -> float:
+	var f := tree.get_theme_font("title_button_font")
+	if f:
+		var fs := tree.get_theme_font_size("title_button_font_size")
+		return f.get_height(fs) + 8.0
+	return 24.0
 
 
 func _on_entities_tree_item_mouse_selected(position: Vector2, mouse_button_index: int):
@@ -1241,10 +1407,13 @@ func system_last_run_data(system_id: int, system_name: String, last_run_data: Di
 			if not display_name.begins_with(ICON_PIN + " "):
 				display_name = ICON_PIN + " " + display_name
 		existing.set_text(0, display_name)
+		# Tooltip reveals the full name when the column clips it
+		existing.set_tooltip_text(0, system_name)
 
 		# Set group in column 1
 		var group = sys_entry.get("group", "")
 		existing.set_text(1, group)
+		existing.set_tooltip_text(1, group)
 
 		# Set execution time in column 2
 		existing.set_text(2, String.num(exec_ms, 3) + " ms")
@@ -1437,6 +1606,44 @@ func entity_component_removed(ent: int, comp: int):
 					break
 				comp_child = comp_child.get_next()
 			# Update entity counts
+			_update_entity_counts(entity_item, ent)
+
+	_update_entity_status_bar()
+
+
+## Reconcile an entity's components against the authoritative id set from a poll.
+## Removes any component (data + tree row) that the entity no longer has — covers
+## removals whose lifecycle event was suppressed or missed.
+func entity_components_synced(ent: int, comp_ids: Array):
+	var id_set := {}
+	for cid in comp_ids:
+		id_set[cid] = true
+	# Prune the editor-side mirror.
+	var entities = get_or_create_dict(ecs_data, "entities")
+	if entities.has(ent) and entities[ent].has("components"):
+		var comps: Dictionary = entities[ent]["components"]
+		for existing_id in comps.keys():
+			if not id_set.has(existing_id):
+				comps.erase(existing_id)
+	# Prune the tree rows.
+	if entities_tree and entities_tree.get_root():
+		var entity_item: TreeItem = null
+		var child = entities_tree.get_root().get_first_child()
+		while child:
+			if child.get_meta("entity_id", null) == ent:
+				entity_item = child
+				break
+			child = child.get_next()
+		if entity_item:
+			var comp_child = entity_item.get_first_child()
+			while comp_child:
+				var nxt = comp_child.get_next()
+				if (
+					comp_child.has_meta("component_id")
+					and not id_set.has(comp_child.get_meta("component_id"))
+				):
+					comp_child.free()
+				comp_child = nxt
 			_update_entity_counts(entity_item, ent)
 
 	_update_entity_status_bar()
@@ -1682,7 +1889,7 @@ func _update_entity_status_bar():
 		var relationships = entity_data.get("relationships", {})
 		total_relationships += relationships.size()
 
-	entity_status_bar.text = (
+	var status := (
 		"Entities: %d | Components: %d | Relationships: %d"
 		% [
 			entity_count,
@@ -1690,6 +1897,9 @@ func _update_entity_status_bar():
 			total_relationships,
 		]
 	)
+	if _query_status_text != "":
+		status += " | " + _query_status_text
+	entity_status_bar.text = status
 
 
 ## Update the systems status bar with execution metrics

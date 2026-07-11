@@ -100,6 +100,14 @@ func _capture(message: String, data: Array, session_id: int) -> bool:
 		# data: [Entity, Component, property_name, old_value, new_value]
 		debugger_tab.entity_component_property_changed(data[0], data[1], data[2], data[3], data[4])
 		return true
+	elif message == Msg.ENTITY_COMPONENTS_SYNCED:
+		# data: [entity_id, comp_ids]
+		debugger_tab.entity_components_synced(data[0], data[1])
+		return true
+	elif message == Msg.ENTITY_QUERY_RESULT:
+		# data: [entity_ids, error]
+		debugger_tab.entity_query_result(data[0], data[1])
+		return true
 	elif message == Msg.READY:
 		# The game announced it has GECS: reply with a subscription.
 		debugger_tab.on_game_ready()

@@ -21,6 +21,11 @@ const Msg = {
 	"COMPONENT_PROPERTY_CHANGED": "gecs:component_property_changed",
 	"POLL_ENTITY": "gecs:poll_entity",
 	"SELECT_ENTITY": "gecs:select_entity",
+	# Poll reconciliation: authoritative list of the component ids an entity
+	# currently has, so the tab can prune rows for components already removed.
+	"ENTITY_COMPONENTS_SYNCED": "gecs:entity_components_synced",
+	# Ad-hoc query runner: game -> editor result for a query typed in the tab.
+	"ENTITY_QUERY_RESULT": "gecs:entity_query_result",
 	# Game -> editor bootstrap: announces the game has GECS so the tab subscribes.
 	"READY": "gecs:ready",
 }
@@ -252,6 +257,25 @@ static func entity_component_added(ent: Entity, comp: Resource) -> bool:
 static func entity_component_removed(ent: Entity, comp: Resource) -> bool:
 	if can_send_message():
 		_send(Msg.ENTITY_COMPONENT_REMOVED, [ent.get_instance_id(), comp.get_instance_id()])
+	return true
+
+
+## Authoritative snapshot of an entity's current component ids (sent at the end of
+## a poll). Lets the tab reconcile — prune rows for components removed while the
+## lifecycle event category was off, or whose removal event was otherwise missed.
+static func entity_components_synced(ent_id: int, comp_ids: Array) -> bool:
+	if can_send_message():
+		_send(Msg.ENTITY_COMPONENTS_SYNCED, [ent_id, comp_ids])
+	return true
+
+
+## Result of an ad-hoc query typed in the tab. [param entity_ids] are the matching
+## entity instance ids (empty on error); [param error] is "" on success or a
+## human-readable parse/eval message. Sent in reply to a "run_entity_query" pull,
+## so it flows on the base attach state, not a category flag.
+static func entity_query_result(entity_ids: Array, error: String) -> bool:
+	if can_send_message():
+		_send(Msg.ENTITY_QUERY_RESULT, [entity_ids, error])
 	return true
 
 
