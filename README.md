@@ -16,7 +16,7 @@ Build scalable, maintainable games with clean separation of data and logic. GECS
 
 ## Requirements
 
-Godot 4.x (tested with 4.7+)
+Godot 4.x (tested with 4.6+)
 
 ## Installation
 
