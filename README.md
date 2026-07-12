@@ -25,7 +25,6 @@ Godot 4.x (tested with 4.6+)
 ```bash
 git submodule add -b release-v8.0.0 https://github.com/csprance/gecs.git addons/gecs
 ```
-Then enable the plugin in **Project Settings > Plugins**.
 
 ### Option B: Manual Copy
 
@@ -34,6 +33,8 @@ Download the release zip, copy `addons/gecs/` into your project, then enable the
 ### Option C: Godot Asset Library
 
 Search for **"GECS"** in the Godot editor AssetLib tab and click Install.
+
+Then enable the plugin in **Project Settings > Plugins**.
 
 ## Quick Start
 
