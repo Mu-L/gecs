@@ -1,6 +1,6 @@
 # GECS
 
-> **Entity Component System for Godot 4.x**
+> **Entity Component System for Godot 4.6+**
 
 Build scalable, maintainable games with clean separation of data and logic. GECS integrates seamlessly with Godot's node system while providing powerful query-based entity filtering.
 
@@ -16,7 +16,7 @@ Build scalable, maintainable games with clean separation of data and logic. GECS
 
 ## Requirements
 
-Godot 4.x (tested with 4.6+)
+Godot 4.6 or newer. (Versions up to and including 4.5 cannot parse the per-system performance monitor code introduced in GECS v8.0.0.)
 
 ## Installation
 

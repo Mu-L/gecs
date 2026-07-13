@@ -4,7 +4,7 @@
 
 <img src="./assets/logo.png" height="128" align="center">
 
-**Lightning-fast Entity Component System for Godot 4.x** - Build scalable, maintainable games with clean separation of data and logic.
+**Lightning-fast Entity Component System for Godot 4.6+** - Build scalable, maintainable games with clean separation of data and logic.
 
 **Discord**: [Join our community](https://discord.gg/eB43XU2tmn)
 

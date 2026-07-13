@@ -1,5 +1,20 @@
 # GECS Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Minimum supported Godot version is now officially 4.6.** The per-system
+  performance monitor (added in v8.0.0) registers via the `MonitorType`
+  parameter of `Performance.add_custom_monitor()`, which does not exist in
+  Godot 4.5 or earlier. On those versions `system.gd` fails to parse and the
+  failure cascades until the `_ECS` autoload cannot instantiate (issue #115,
+  misdiagnosed as a type-annotation deadlock in PR #119). GECS has therefore
+  been de-facto 4.6+ since v8.0.0; this makes it official instead of adding
+  version-gated compatibility code. CI now runs on Godot 4.6 (was 4.5,
+  red since 2026-04-25 because of this). The last release that supports
+  Godot 4.5 is v7.1.0.
+
 ## [9.1.0] - 2026-07-10 - Debugger instrumentation overhaul
 
 The v9 performance line made the simulation fast; this release gives the editor
