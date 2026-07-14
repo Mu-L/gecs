@@ -437,8 +437,10 @@ func _handle(delta: float) -> void:
 	if tick_source and not tick_source.ticked:
 		return
 	# Always measure time when the Performance monitor is on, even without ECS.debug,
-	# so the monitor callable has a live value to return.
-	var measure_time := ECS.debug or performance_monitor
+	# so the monitor callable has a live value to return. Explicit bool: Godot 4.6
+	# cannot infer types through the ECS autoload reference while this script
+	# parses inside the ecs.gd dependency cycle.
+	var measure_time: bool = ECS.debug or performance_monitor
 	var start_time_usec := 0
 	if measure_time:
 		start_time_usec = Time.get_ticks_usec()

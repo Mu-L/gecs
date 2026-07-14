@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Godot 4.6 parse errors from type inference through the ECS autoload.** Three
+  locals (`_perf` twice in `world.gd`, `measure_time` in `system.gd`) used `:=`
+  inference on expressions involving `ECS.debug`. Godot 4.6's analyzer cannot
+  resolve the autoload's member types while parsing inside the ecs.gd dependency
+  cycle (4.7 can), so the scripts failed to parse and the `_ECS` autoload could
+  not instantiate. Now annotated `: bool` explicitly.
+
 ### Changed
 
 - **Minimum supported Godot version is now officially 4.6.** The per-system

@@ -1896,7 +1896,9 @@ func _query(
 	wildcard_ex_rel_types: Array = [],
 ) -> Array:
 	# Opt-in query timing; off unless perf tooling enabled it (see perf_instrumentation).
-	var _perf := ECS.debug and perf_instrumentation
+	# Explicit bool: Godot 4.6 cannot infer types through the ECS autoload
+	# reference while this script parses inside the ecs.gd dependency cycle.
+	var _perf: bool = ECS.debug and perf_instrumentation
 	var _perf_start_total := 0
 	if _perf:
 		_perf_start_total = Time.get_ticks_usec()
@@ -2085,7 +2087,9 @@ func group_entities_by_archetype(entities: Array) -> Dictionary:
 ## [/codeblock]
 func get_matching_archetypes(query_builder: QueryBuilder) -> Array[Archetype]:
 	# Opt-in query timing; off unless perf tooling enabled it (see perf_instrumentation).
-	var _perf := ECS.debug and perf_instrumentation
+	# Explicit bool: Godot 4.6 cannot infer types through the ECS autoload
+	# reference while this script parses inside the ecs.gd dependency cycle.
+	var _perf: bool = ECS.debug and perf_instrumentation
 	var _perf_start := 0
 	if _perf:
 		_perf_start = Time.get_ticks_usec()
