@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- **`GECSIO.save` now creates missing destination directories.** `ResourceSaver`
+  does not, so saving to a folder that never existed (fresh checkout, first run
+  on a new machine) always failed. This is why every serialization test failed
+  in CI: `reports/` is gitignored and absent there, present in dev checkouts.
 - **Godot 4.6 parse errors from type inference through the ECS autoload.** Three
   locals (`_perf` twice in `world.gd`, `measure_time` in `system.gd`) used `:=`
   inference on expressions involving `ECS.debug`. Godot 4.6's analyzer cannot

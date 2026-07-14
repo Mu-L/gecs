@@ -121,6 +121,12 @@ static func save(gecs_data: GecsData, filepath: String, binary: bool = false) ->
 		flags = ResourceSaver.FLAG_COMPRESS  # Binary format uses no flags, .res extension determines format
 	# else: text format (default flags = 0)
 
+	# ResourceSaver does not create missing directories; without this, saving
+	# to a folder that has never existed (e.g. a fresh checkout) always fails.
+	var base_dir = final_path.get_base_dir()
+	if base_dir and not DirAccess.dir_exists_absolute(base_dir):
+		DirAccess.make_dir_recursive_absolute(base_dir)
+
 	var result = ResourceSaver.save(gecs_data, final_path, flags)
 	if result != OK:
 		push_error("GECS save: Failed to save resource to: " + final_path)
