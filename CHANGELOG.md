@@ -1,34 +1,6 @@
 # GECS Changelog
 
-## [Unreleased]
-
-### Fixed
-
-- **`GECSIO.save` now creates missing destination directories.** `ResourceSaver`
-  does not, so saving to a folder that never existed (fresh checkout, first run
-  on a new machine) always failed. This is why every serialization test failed
-  in CI: `reports/` is gitignored and absent there, present in dev checkouts.
-- **Godot 4.6 parse errors from type inference through the ECS autoload.** Three
-  locals (`_perf` twice in `world.gd`, `measure_time` in `system.gd`) used `:=`
-  inference on expressions involving `ECS.debug`. Godot 4.6's analyzer cannot
-  resolve the autoload's member types while parsing inside the ecs.gd dependency
-  cycle (4.7 can), so the scripts failed to parse and the `_ECS` autoload could
-  not instantiate. Now annotated `: bool` explicitly.
-
-### Changed
-
-- **Minimum supported Godot version is now officially 4.6.** The per-system
-  performance monitor (added in v8.0.0) registers via the `MonitorType`
-  parameter of `Performance.add_custom_monitor()`, which does not exist in
-  Godot 4.5 or earlier. On those versions `system.gd` fails to parse and the
-  failure cascades until the `_ECS` autoload cannot instantiate (issue #115,
-  misdiagnosed as a type-annotation deadlock in PR #119). GECS has therefore
-  been de-facto 4.6+ since v8.0.0; this makes it official instead of adding
-  version-gated compatibility code. CI now runs on Godot 4.6 (was 4.5,
-  red since 2026-04-25 because of this). The last release that supports
-  Godot 4.5 is v7.1.0.
-
-## [9.1.0] - 2026-07-10 - Debugger instrumentation overhaul
+## [9.1.0] - 2026-07-24 - Debugger instrumentation overhaul
 
 The v9 performance line made the simulation fast; this release gives the editor
 debugger the same treatment. With `gecs/settings/debug_mode = true`, the runtime
@@ -36,6 +8,11 @@ now produces **nothing** until the GECS editor tab actually subscribes — the
 per-`world.process()` instrumentation cost drops from **~20 ms/call to ~0.009 ms/call**
 (1000 entities, one no-match system, headless), matching debug-off. Attached cost
 is bounded by sampling telemetry at the tab's chosen rate instead of every frame.
+
+This release also officially raises the minimum supported Godot version to 4.6
+and hardens two crash classes: systems that remove themselves (or their whole
+group) mid-frame, and relationships whose target entity was freed outside
+`remove_entity()`.
 
 ### Added
 
@@ -57,6 +34,16 @@ is bounded by sampling telemetry at the tab's chosen rate instead of every frame
 
 ### Changed
 
+- **Minimum supported Godot version is now officially 4.6.** The per-system
+  performance monitor (added in v8.0.0) registers via the `MonitorType`
+  parameter of `Performance.add_custom_monitor()`, which does not exist in
+  Godot 4.5 or earlier. On those versions `system.gd` fails to parse and the
+  failure cascades until the `_ECS` autoload cannot instantiate (issue #115,
+  misdiagnosed as a type-annotation deadlock in PR #119). GECS has therefore
+  been de-facto 4.6+ since v8.0.0; this makes it official instead of adding
+  version-gated compatibility code. CI now runs on Godot 4.6 (was 4.5,
+  red since 2026-04-25 because of this). The last release that supports
+  Godot 4.5 is v7.1.0.
 - **Per-system telemetry is sampled/throttled** to the tab's subscribed Hz rather than
   emitted every frame per system.
 - **System debug name is cached once** at `_internal_setup()` — the per-frame
@@ -68,6 +55,40 @@ is bounded by sampling telemetry at the tab's chosen rate instead of every frame
 
 ### Fixed
 
+- **Crash when a system removed itself as the last system in its group.**
+  `remove_system()` erases an emptied group key, and `world.process()` then
+  re-read that key for the PER_GROUP command-buffer flush, crashing mid-frame.
+  The flush now re-checks the key, `remove_system()` guards the group lookup
+  (fixing a latent double-remove crash), and `remove_system_group()` iterates a
+  copy of the group so erasing from the live array no longer skips every other
+  system. `world.process()` also no longer skips the system that shifts into
+  the vacated slot when a peer removes itself mid-frame (slot re-check, no
+  per-frame array copy). New tests in `tests/core/test_system_removal.gd`.
+- **Dangling relationship targets no longer crash the framework.** An entity
+  freed outside `remove_entity()` (direct `free()`/`queue_free()` teardown)
+  leaves relationships holding a freed target. On Godot 4 a freed object
+  compares equal to `null` but hard-errors as the left operand of `is`, which
+  crashed query cache key hashing, archetype signature calculation, structural
+  query building, save serialization, network relationship sync, and the
+  debugger's relationship formatter (and where a `== null` check ran first, the
+  freed target silently behaved as a wildcard instead). Dangling relationships
+  are now inert everywhere: they match no queries, produce no archetype slot
+  keys, are dropped from `GECSIO` saves, are skipped by network relationship
+  sync, and report `valid() == false` so `get_relationship(s)` lazily prunes
+  them. `remove_entity()` and `purge()` also compact dangling refs out of the
+  entity list instead of erroring on the typed-array write. New tests in
+  `tests/core/test_dangling_relationship_target.gd` and
+  `tests/network/test_sync_relationship_handler.gd`.
+- **`GECSIO.save` now creates missing destination directories.** `ResourceSaver`
+  does not, so saving to a folder that never existed (fresh checkout, first run
+  on a new machine) always failed. This is why every serialization test failed
+  in CI: `reports/` is gitignored and absent there, present in dev checkouts.
+- **Godot 4.6 parse errors from type inference through the ECS autoload.** Three
+  locals (`_perf` twice in `world.gd`, `measure_time` in `system.gd`) used `:=`
+  inference on expressions involving `ECS.debug`. Godot 4.6's analyzer cannot
+  resolve the autoload's member types while parsing inside the ecs.gd dependency
+  cycle (4.7 can), so the scripts failed to parse and the `_ECS` autoload could
+  not instantiate. Now annotated `: bool` explicitly.
 - **~20 ms/`world.process()` instrumentation cost with `debug_mode` on and no debugger
   attached** — every message send hit an engine `Capture not registered: 'gecs'` error
   (I/O) several times per frame. Sends are now gated on a live subscription; the error
