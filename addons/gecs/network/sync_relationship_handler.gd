@@ -55,6 +55,11 @@ func serialize_relationship(relationship: Relationship) -> Dictionary:
 	}
 
 	var target = relationship.target
+	# Freed target: dangling relationships are inert and not synced. Checked
+	# FIRST: a freed object compares == null (would serialize as a null-target
+	# recipe) and `is` hard-errors on a freed operand.
+	if typeof(target) == TYPE_OBJECT and not is_instance_valid(target):
+		return {}
 	if target == null:
 		recipe["tt"] = "N"
 		recipe["t"] = ""
@@ -379,12 +384,12 @@ func handle_relationship_remove(payload: Dictionary) -> void:
 				continue
 			# Match target by entity id if target type is Entity
 			if recipe.get("tt", "") == "E":
-				if existing_rel.target is Entity and existing_rel.target.id == target_id:
+				# Freed/null target checked first; `is` hard-errors on a freed operand
+				if existing_rel.target == null or not is_instance_valid(existing_rel.target):
 					entity.remove_relationship(existing_rel)
 					found = true
 					break
-				# Target entity already freed - match by null target with same relation
-				if existing_rel.target == null or not is_instance_valid(existing_rel.target):
+				if existing_rel.target is Entity and existing_rel.target.id == target_id:
 					entity.remove_relationship(existing_rel)
 					found = true
 					break
@@ -399,20 +404,22 @@ func handle_relationship_remove(payload: Dictionary) -> void:
 					if existing_rel.target == null or not is_instance_valid(existing_rel.target):
 						matches = true
 				elif target_type == "C":
-					# Component target: match by script path
-					if existing_rel.target is Component:
+					# Component target: match by script path.
+					# Freed/null target checked first; `is` hard-errors on a freed operand.
+					if existing_rel.target == null or not is_instance_valid(existing_rel.target):
+						matches = true
+					elif existing_rel.target is Component:
 						var target_script = existing_rel.target.get_script()
 						if target_script != null and target_script.resource_path == target_ref:
 							matches = true
-					elif existing_rel.target == null or not is_instance_valid(existing_rel.target):
-						matches = true
 				elif target_type == "S":
-					# Script target: match by script path
-					if existing_rel.target is Script:
+					# Script target: match by script path.
+					# Freed/null target checked first; `is` hard-errors on a freed operand.
+					if existing_rel.target == null or not is_instance_valid(existing_rel.target):
+						matches = true
+					elif existing_rel.target is Script:
 						if existing_rel.target.resource_path == target_ref:
 							matches = true
-					elif existing_rel.target == null or not is_instance_valid(existing_rel.target):
-						matches = true
 
 				if matches:
 					entity.remove_relationship(existing_rel)

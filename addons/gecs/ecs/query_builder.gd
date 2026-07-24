@@ -180,6 +180,10 @@ func with_relationship(relationships: Array = []) -> QueryBuilder:
 		if rel._is_query_relationship or rel_path == "":
 			# Property queries can't be structural
 			_post_filter_relationships.append(rel)
+		elif typeof(rel.target) == TYPE_OBJECT and not is_instance_valid(rel.target):
+			# Freed target (checked before `is`, which errors on freed operands):
+			# inert; post-filter via matches(), which treats it as matching nothing.
+			_post_filter_relationships.append(rel)
 		elif rel.target is Script:
 			# Script target: use wildcard index to narrow, then post-filter for script match
 			if not _wildcard_rel_types.has(rel_path):
@@ -217,6 +221,10 @@ func without_relationship(relationships: Array = []) -> QueryBuilder:
 	for rel in relationships:
 		var rel_path = _world._get_relationship_relation_path(rel) if _world else ""
 		if rel._is_query_relationship or rel_path == "":
+			_post_filter_ex_relationships.append(rel)
+		elif typeof(rel.target) == TYPE_OBJECT and not is_instance_valid(rel.target):
+			# Freed target: inert; matches() treats it as matching nothing, so
+			# nothing gets excluded.
 			_post_filter_ex_relationships.append(rel)
 		elif rel.target is Script:
 			# Script target: can't exclude structurally, use post-filter

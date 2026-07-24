@@ -162,6 +162,18 @@ func test_serialize_returns_empty_for_null_relation():
 	assert_dict(recipe).is_empty()
 
 
+func test_serialize_returns_empty_for_freed_entity_target():
+	# Target freed outside remove_entity leaves a dangling rel.target; the
+	# serializer must skip it instead of crashing on the `is` chain.
+	var target = Entity.new()
+	var rel = Relationship.new(C_TestA.new(), target)
+	target.free()
+
+	var recipe = handler.serialize_relationship(rel)
+
+	assert_dict(recipe).is_empty()
+
+
 # ============================================================================
 # ENTITY RELATIONSHIPS BATCH SERIALIZATION
 # ============================================================================
@@ -190,6 +202,32 @@ func test_serialize_entity_relationships():
 
 	# Check second recipe (C_TestB -> null)
 	assert_str(recipes[1]["tt"]).is_equal("N")
+
+
+func test_serialize_entity_relationships_skips_dangling():
+	var source = Entity.new()
+	source.name = "Source"
+	source.id = 9001
+	world.add_entity(source)
+
+	var live_target = Entity.new()
+	live_target.name = "LiveTarget"
+	live_target.id = 9002
+	world.add_entity(live_target)
+
+	# Not added to the world so teardown never sees the freed ref
+	var doomed_target = Entity.new()
+
+	source.add_relationship(Relationship.new(C_TestA.new(), live_target))
+	source.add_relationship(Relationship.new(C_TestB.new(), doomed_target))
+
+	doomed_target.free()
+
+	var recipes = handler.serialize_entity_relationships(source)
+
+	assert_int(recipes.size()).is_equal(1)
+	assert_str(recipes[0]["tt"]).is_equal("E")
+	assert_int(recipes[0]["t"]).is_equal(9002)
 
 
 func test_apply_entity_relationships():

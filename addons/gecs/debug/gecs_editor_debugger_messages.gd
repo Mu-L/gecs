@@ -310,8 +310,11 @@ static func entity_relationship_added(ent: Entity, rel: Relationship) -> bool:
 			"target_data": {},
 		}
 
-		# Format target based on type
-		if rel.target == null:
+		# Format target based on type (freed checked first: a freed object
+		# compares == null and `is` errors on a freed operand)
+		if typeof(rel.target) == TYPE_OBJECT and not is_instance_valid(rel.target):
+			rel_data["target_type"] = "Freed"
+		elif rel.target == null:
 			rel_data["target_type"] = "null"
 		elif rel.target is Entity:
 			rel_data["target_type"] = "Entity"

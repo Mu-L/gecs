@@ -191,7 +191,15 @@ func matches(other: Relationship) -> bool:
 			rel_match = _relation_script == other._relation_script
 
 	# Compare targets
-	if other.target == null or target == null:
+	if (
+		(typeof(target) == TYPE_OBJECT and not is_instance_valid(target))
+		or (typeof(other.target) == TYPE_OBJECT and not is_instance_valid(other.target))
+	):
+		# Freed targets are inert and match nothing. Checked FIRST: a freed
+		# object compares == null (the wildcard branch below would swallow it)
+		# and `is` hard-errors on a freed left operand.
+		target_match = false
+	elif other.target == null or target == null:
 		# If either target is null, consider it a match (wildcard)
 		target_match = true
 	else:
@@ -244,7 +252,12 @@ func matches(other: Relationship) -> bool:
 func valid() -> bool:
 	# make sure the target is valid or null
 	var target_valid = false
-	if target == null:
+	if typeof(target) == TYPE_OBJECT and not is_instance_valid(target):
+		# Freed target (e.g. Entity freed outside remove_entity): checked FIRST,
+		# since a freed object compares == null (the null branch would report it
+		# valid) and any `is` check hard-errors on a freed operand.
+		target_valid = false
+	elif target == null:
 		target_valid = true
 	elif target is Entity:
 		target_valid = is_instance_valid(target)
@@ -278,8 +291,10 @@ func _to_string() -> String:
 		# Standard relation - just the type
 		parts.append(relation.get_script().resource_path)
 
-	# Format target
-	if target == null:
+	# Format target (freed checked first: a freed object compares == null)
+	if typeof(target) == TYPE_OBJECT and not is_instance_valid(target):
+		parts.append("<freed>")
+	elif target == null:
 		parts.append("null")
 	elif target is Entity:
 		# Use instance_id for stability - entity ID may not be set yet

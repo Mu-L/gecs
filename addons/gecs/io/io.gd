@@ -89,8 +89,11 @@ static func serialize_entities(entities: Array, config: GECSSerializeConfig = nu
 		if effective_config.include_related_entities:
 			# Check all relationships of this entity
 			for relationship in entity.relationships:
-				if relationship.target is Entity:
-					var target_entity = relationship.target as Entity
+				var rel_target = relationship.target
+				if typeof(rel_target) == TYPE_OBJECT and not is_instance_valid(rel_target):
+					continue  # dangling target; `is` errors on a freed operand
+				if rel_target is Entity:
+					var target_entity = rel_target as Entity
 					var target_id = target_entity.id
 
 					# If this entity hasn't been processed yet, auto-include it
@@ -208,7 +211,9 @@ static func _serialize_entity(
 	if config.include_relationships:
 		for relationship in entity.relationships:
 			var rel_data = GecsRelationshipData.from_relationship(relationship)
-			relationships.append(rel_data)
+			# null means the target was freed; dangling rels are dropped from saves
+			if rel_data != null:
+				relationships.append(rel_data)
 
 	return (
 		GecsEntityData

@@ -85,15 +85,20 @@ static func build(
 		else:
 			pair.append(0)
 
-		# Target ID
-		if rel.target is Component:
-			pair.append(rel.target.get_script().get_instance_id())
-		elif rel.target is Entity:
-			pair.append(rel.target.get_instance_id())
-		elif rel.target is Script:
-			pair.append(rel.target.get_instance_id())
-		elif rel.target != null:
-			pair.append(rel.target.hash())
+		# Target ID. Guard freed targets FIRST; `is` errors on a freed left operand.
+		# Entity targets are Nodes and can dangle when freed outside remove_entity
+		# (see Relationship.valid()); treat them as inert like a null target.
+		var target = rel.target
+		if typeof(target) == TYPE_OBJECT and not is_instance_valid(target):
+			pair.append(0)
+		elif target is Component:
+			pair.append(target.get_script().get_instance_id())
+		elif target is Entity:
+			pair.append(target.get_instance_id())
+		elif target is Script:
+			pair.append(target.get_instance_id())
+		elif target != null:
+			pair.append(target.hash())
 		else:
 			pair.append(0)
 
@@ -112,14 +117,18 @@ static func build(
 		else:
 			pair.append(0)
 
-		if rel.target is Component:
-			pair.append(rel.target.get_script().get_instance_id())
-		elif rel.target is Entity:
-			pair.append(rel.target.get_instance_id())
-		elif rel.target is Script:
-			pair.append(rel.target.get_instance_id())
-		elif rel.target != null:
-			pair.append(rel.target.hash())
+		# Same freed-target guard as the include loop above.
+		var ex_target = rel.target
+		if typeof(ex_target) == TYPE_OBJECT and not is_instance_valid(ex_target):
+			pair.append(0)
+		elif ex_target is Component:
+			pair.append(ex_target.get_script().get_instance_id())
+		elif ex_target is Entity:
+			pair.append(ex_target.get_instance_id())
+		elif ex_target is Script:
+			pair.append(ex_target.get_instance_id())
+		elif ex_target != null:
+			pair.append(ex_target.hash())
 		else:
 			pair.append(0)
 

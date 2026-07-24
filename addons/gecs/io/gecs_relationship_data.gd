@@ -41,8 +41,16 @@ func _init(
 	target_script_path = _target_script_path
 
 
-## Creates GecsRelationshipData from a Relationship instance
+## Creates GecsRelationshipData from a Relationship instance.
+## Returns null for relationships whose target was freed (dangling relationships
+## are inert and are dropped from saves).
 static func from_relationship(relationship: Relationship) -> GecsRelationshipData:
+	# Freed target (Entity freed outside remove_entity): checked before the
+	# `is` chain below, which hard-errors on a freed operand.
+	var rel_target = relationship.target
+	if typeof(rel_target) == TYPE_OBJECT and not is_instance_valid(rel_target):
+		return null
+
 	var data = GecsRelationshipData.new()
 
 	# Store relation component (duplicate to avoid reference issues)

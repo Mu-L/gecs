@@ -354,7 +354,14 @@ func process(delta: float, group: String = "") -> void:
 			for timer in _group_timers[group]:
 				timer.advance(delta)
 		var system_index = 0
-		for system in systems_by_group[group]:
+		# Index iteration with a slot re-check: remove_system() erases from this
+		# live array, and a for-in would skip the system that shifts into the
+		# vacated slot when a system removes itself (or an earlier peer)
+		# mid-frame. Costs one comparison per system, no per-frame copy.
+		var group_systems: Array = systems_by_group[group]
+		var slot := 0
+		while slot < group_systems.size():
+			var system = group_systems[slot]
 			if system.active:
 				system._handle(delta)
 				if telemetry_due:
@@ -365,14 +372,27 @@ func process(delta: float, group: String = "") -> void:
 						"",
 					)
 					system_index += 1
+			# Advance only if the slot still holds this system; an erase at or
+			# before it shifted the next system into the slot.
+			if slot < group_systems.size() and group_systems[slot] == system:
+				slot += 1
 
-		# Flush PER_GROUP command buffers after all systems in the group complete
-		for system in systems_by_group[group]:
-			if (
-				system.command_buffer_flush_mode == System.FlushMode.PER_GROUP
-				and system.has_pending_commands()
-			):
-				system.cmd.execute()
+		# Flush PER_GROUP command buffers after all systems in the group complete.
+		# Re-check the key: a system that removed itself above may have emptied the
+		# group, which erases it from the dictionary mid-frame. Same slot re-check
+		# as above in case a flushed command removes a system.
+		if systems_by_group.has(group):
+			var flush_systems: Array = systems_by_group[group]
+			var flush_slot := 0
+			while flush_slot < flush_systems.size():
+				var system = flush_systems[flush_slot]
+				if (
+					system.command_buffer_flush_mode == System.FlushMode.PER_GROUP
+					and system.has_pending_commands()
+				):
+					system.cmd.execute()
+				if flush_slot < flush_systems.size() and flush_systems[flush_slot] == system:
+					flush_slot += 1
 	if telemetry_due:
 		assert(GECSEditorDebuggerMessages.process_world(delta, group), "")
 
@@ -465,8 +485,11 @@ func add_entity(entity: Entity, components = null, add_to_tree = true) -> void:
 	# Stabilize target IDs before archetype key/signature generation so entities
 	# with pre-registered relationship targets don't get stale entity#0 slot keys.
 	for relationship in entity.relationships:
-		if relationship.target is Entity:
-			_ensure_entity_id(relationship.target)
+		var rel_target = relationship.target
+		if typeof(rel_target) == TYPE_OBJECT and not is_instance_valid(rel_target):
+			continue  # dangling target; `is` errors on a freed operand
+		if rel_target is Entity:
+			_ensure_entity_id(rel_target)
 
 	# Update index
 	_worldLogger.debug("add_entity Adding Entity to World: ", entity)
@@ -575,6 +598,12 @@ func remove_entity(entity: Entity) -> void:
 	var erase_idx: int = entity._entities_index
 	if erase_idx >= 0 and erase_idx < entities.size() and entities[erase_idx] == entity:
 		var last := entities.size() - 1
+		# The tail can hold dangling refs from entities freed outside
+		# remove_entity; the typed array refuses them on write (leaving this
+		# entity behind in its slot), so drop them before swapping.
+		while last > erase_idx and not is_instance_valid(entities[last]):
+			entities.remove_at(last)
+			last -= 1
 		if erase_idx != last:
 			var moved: Entity = entities[last]
 			entities[erase_idx] = moved
@@ -791,10 +820,11 @@ func add_systems(_systems: Array, topo_sort: bool = false):
 ##      [codeblock]world.remove_system(movement_system)[/codeblock]
 func remove_system(system, topo_sort: bool = false) -> void:
 	_worldLogger.debug("remove_system Removing System: ", system)
-	systems_by_group[system.group].erase(system)
+	if systems_by_group.has(system.group):
+		systems_by_group[system.group].erase(system)
+		if systems_by_group[system.group].size() == 0:
+			systems_by_group.erase(system.group)
 	_timers_dirty = true
-	if systems_by_group[system.group].size() == 0:
-		systems_by_group.erase(system.group)
 	system_removed.emit(system)
 	# Update index
 	system.queue_free()
@@ -821,7 +851,9 @@ func remove_systems(_systems: Array, topo_sort: bool = false) -> void:
 ##      [codeblock]world.remove_system_group("Gameplay")[/codeblock]
 func remove_system_group(group: String, topo_sort: bool = false) -> void:
 	if systems_by_group.has(group):
-		for system in systems_by_group[group]:
+		# Iterate a copy: remove_system erases from the live array (and can erase
+		# the group key), which would otherwise skip every other system.
+		for system in systems_by_group[group].duplicate():
 			remove_system(system)
 		if topo_sort:
 			ArrayExtensions.topological_sort(systems_by_group)
@@ -834,7 +866,18 @@ func purge(should_free = true, keep := []) -> void:
 	# Get rid of all entities
 	_worldLogger.debug("Purging Entities", entities)
 	for entity in entities.duplicate().filter(func(x): return not keep.has(x)):
-		remove_entity(entity)
+		# Entities freed outside remove_entity leave dangling refs that the typed
+		# remove_entity parameter would reject at the call boundary.
+		if is_instance_valid(entity):
+			remove_entity(entity)
+	# Compact away those dangling refs, re-syncing the swap-removal index for
+	# surviving (kept) entities.
+	var live_entities: Array[Entity] = []
+	for entity in entities:
+		if is_instance_valid(entity):
+			entity._entities_index = live_entities.size()
+			live_entities.append(entity)
+	entities = live_entities
 
 	# Clear relationship indexes after purging entities
 	_relation_type_archetype_index.clear()
@@ -2413,8 +2456,11 @@ func _warn_structural_change_during_iteration(what: String, entity: Entity) -> v
 ## Get the stable handle id of a relationship's target entity.
 ## Returns 0 if target is not an Entity.
 func _get_relationship_target_id(relationship: Relationship) -> int:
-	if relationship.target is Entity:
-		return _ensure_entity_id(relationship.target)
+	var target = relationship.target
+	if typeof(target) == TYPE_OBJECT and not is_instance_valid(target):
+		return 0  # dangling target; `is` errors on a freed operand
+	if target is Entity:
+		return _ensure_entity_id(target)
 	return 0
 
 
@@ -2520,7 +2566,10 @@ func _cleanup_relationships_to_target(target: Entity) -> void:
 			continue
 		var rels_to_remove: Array = []
 		for rel in source_entity.relationships:
-			if rel.target is Entity and rel.target == target:
+			var rel_target = rel.target
+			if typeof(rel_target) == TYPE_OBJECT and not is_instance_valid(rel_target):
+				continue  # dangling target from an earlier direct free; can't match
+			if rel_target is Entity and rel_target == target:
 				rels_to_remove.append(rel)
 		# Go through the documented Entity.remove_relationship API so any future
 		# bookkeeping there (beyond erase+emit) stays consistent with other removal paths.
@@ -2552,8 +2601,15 @@ func _calculate_entity_signature(entity: Entity) -> int:
 	# Property-query relationships are excluded (they remain post-filter only)
 	var structural_rels: Array = []
 	for rel in entity.relationships:
-		if not rel._is_query_relationship and _get_relationship_relation_path(rel) != "":
-			structural_rels.append(rel)
+		if rel._is_query_relationship or _get_relationship_relation_path(rel) == "":
+			continue
+		# Skip relationships whose Entity target was freed outside remove_entity
+		# (e.g. direct queue_free teardown); dangling rels are inert, matching
+		# Relationship.valid() semantics, and must not shape the signature.
+		var rel_target = rel.target
+		if typeof(rel_target) == TYPE_OBJECT and not is_instance_valid(rel_target):
+			continue
+		structural_rels.append(rel)
 
 	# Use the SAME hash function as queries - entity is just "all components, no any/exclude"
 	# OPTIMIZATION: Removed enabled_marker from signature - now handled by bitset in archetype
@@ -2591,7 +2647,12 @@ func _relationship_slot_key(rel: Relationship) -> String:
 	var rel_path = _get_relationship_relation_path(rel)
 	if rel_path == "":
 		return ""
-	return _relationship_slot_key_from_parts(rel_path, rel.target)
+	# Freed targets (Entity freed outside remove_entity) are inert; no slot key,
+	# consistent with _calculate_entity_signature skipping dangling rels.
+	var target = rel.target
+	if typeof(target) == TYPE_OBJECT and not is_instance_valid(target):
+		return ""
+	return _relationship_slot_key_from_parts(rel_path, target)
 
 
 func _relationship_slot_key_from_parts(rel_path: String, target: Variant) -> String:
@@ -2617,8 +2678,12 @@ func _get_compatible_relationship_slot_keys(rel: Relationship) -> Array:
 	if primary_key != "":
 		keys.append(primary_key)
 
-	if rel.target is Entity or rel.target is Component:
-		var target_script = rel.target.get_script()
+	var rel_target = rel.target
+	if typeof(rel_target) == TYPE_OBJECT and not is_instance_valid(rel_target):
+		return keys  # dangling target; no compatible slots, matches nothing
+
+	if rel_target is Entity or rel_target is Component:
+		var target_script = rel_target.get_script()
 		if target_script:
 			var script_key = _relationship_slot_key_from_parts(rel_path, target_script)
 			if not keys.has(script_key):
