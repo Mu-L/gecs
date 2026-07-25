@@ -37,7 +37,6 @@ jobs:
           godot-version: "4.6"
           paths: |
             res://addons/gecs/tests/
-            res://addons/gecs_network/tests/
           timeout: 5
           report-name: test_report.xml
           arguments: "--quiet"

@@ -32,8 +32,8 @@ manager/music/bus="Music"
 
 [autoload]
 
-DebugMenu="*uid://cggqb75a8w8r"
-ECS="*uid://dfqwl5njvdnmq"
+DebugMenu="*res://addons/debug_menu/debug_menu.tscn"
+ECS="*res://addons/gecs/ecs/ecs.gd"
 
 [display]
 

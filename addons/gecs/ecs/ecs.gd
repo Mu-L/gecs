@@ -85,6 +85,13 @@ func _ready() -> void:
 	GECSEditorDebuggerMessages.ready()
 
 
+func _exit_tree() -> void:
+	# Unregister what _ready registered; leaving the capture behind produces a
+	# "Capture not registered: 'gecs'" error during engine shutdown.
+	if not Engine.is_editor_hint() and EngineDebugger.has_capture("gecs"):
+		EngineDebugger.unregister_message_capture("gecs")
+
+
 ## Editor -> game control channel (the "gecs:" capture). Handles subscription
 ## lifecycle here; forwards everything else to the active World.
 func _on_debugger_message(message: String, data: Array) -> bool:

@@ -55,12 +55,21 @@ class MockNetworkSync:
 	var spawn_rpc_calls: Array = []
 	var despawn_rpc_calls: Array = []
 
+	# Landing spot for SpawnManager's call_deferred("_deferred_broadcast", ...);
+	# without it the message-queue flush errors with "Method not found" at end
+	# of frame. Records only; leaves _broadcast_pending untouched so tests can
+	# still assert the pre-flush queued state.
+	var deferred_broadcast_calls: Array = []
+
 	# Relationship handler reference (null by default; set in tests that need it)
 	var _relationship_handler = null
 
 	func _init(w: World) -> void:
 		_world = w
 		net_adapter = MockNetAdapter.new()
+
+	func _deferred_broadcast(_entity, entity_id) -> void:
+		deferred_broadcast_calls.append(entity_id)
 
 	# Called by SpawnManager to broadcast a spawn to all peers
 	func rpc_broadcast_spawn(data: Dictionary) -> void:

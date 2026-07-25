@@ -5,7 +5,6 @@ repomix-output.txt
 
 # Local dev tooling (not part of the GECS addon)
 addons/gdUnit4/GdUnitRunner.cfg
-addons/stack_trace_copier/
 
 # Windows reserved device names (prevent accidental creation)
 nul
