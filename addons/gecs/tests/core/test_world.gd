@@ -37,6 +37,31 @@ func test_add_and_remove_system():
 	assert_bool(world.systems.has(system)).is_false()
 
 
+func test_add_entity_twice_is_noop():
+	var entity = Entity.new()
+	world.add_entity(entity)
+	world.add_entity(entity)
+	assert_int(world.entities.count(entity)).is_equal(1)
+
+
+func test_add_disabled_entity_again_is_noop():
+	var entity = Entity.new()
+	world.add_entity(entity)
+	world.disable_entity(entity)
+	# Disabled entities stay in the entities array with _world nulled; a re-add
+	# must not double them.
+	world.add_entity(entity)
+	assert_int(world.entities.count(entity)).is_equal(1)
+	assert_bool(entity.enabled).is_false()
+
+
+func test_add_system_twice_is_noop():
+	var system = System.new()
+	world.add_system(system)
+	world.add_system(system)
+	assert_int(world.systems.count(system)).is_equal(1)
+
+
 func test_add_system_calls_setup():
 	var system = SetupTestSystem.new()
 	assert_bool(system.setup_was_called).is_false()

@@ -445,6 +445,17 @@ func update_pause_state(paused: bool) -> void:
 ## world.add_entity(other_entity, [component_a, component_b])
 ## [/codeblock]
 func add_entity(entity: Entity, components = null, add_to_tree = true) -> void:
+	# Idempotency: re-adding an entity this world already tracks would double it
+	# in `entities` and re-announce it to the debugger. Same identity check as
+	# remove_entity's fast path (covers disabled entities, whose _world is null).
+	if (
+		entity._entities_index >= 0
+		and entity._entities_index < entities.size()
+		and entities[entity._entities_index] == entity
+	):
+		_worldLogger.debug("add_entity Entity already in world, skipping: ", entity)
+		return
+
 	# Identity: keep a pre-assigned nonzero id verbatim (deserialization /
 	# network replication); otherwise allocate a generational handle.
 	if entity.id == 0:
@@ -772,6 +783,13 @@ func unregister_alias(alias: StringName) -> void:
 ## [b]Example:[/b]
 ##      [codeblock]world.add_system(movement_system)[/codeblock]
 func add_system(system: System, topo_sort: bool = false) -> void:
+	# Idempotency: a re-add would run the system twice per frame and duplicate
+	# its debugger announcement. (Check the group dict directly: `systems` is a
+	# computed getter that flattens all groups per access.)
+	if systems_by_group.get(system.group, []).has(system):
+		_worldLogger.debug("add_system System already in world, skipping: ", system)
+		return
+
 	if not system.is_inside_tree():
 		get_node(system_nodes_root).add_child(system)
 	_worldLogger.trace("add_system Adding System: ", system)
@@ -3187,6 +3205,10 @@ func _send_debugger_snapshot() -> void:
 			if not is_instance_valid(entity):
 				continue
 			assert(GECSEditorDebuggerMessages.entity_added(entity, entity.is_inside_tree()), "")
+			# Lifecycle events are edge-triggered, so a late-attaching tab needs the
+			# current disabled state replayed alongside the add.
+			if not entity.enabled:
+				assert(GECSEditorDebuggerMessages.entity_disabled(entity), "")
 			for comp_key in entity.components.keys():
 				var comp = entity.components[comp_key]
 				if comp and comp is Resource:

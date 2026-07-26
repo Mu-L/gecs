@@ -189,13 +189,15 @@ static func entity_removed(ent_id: int, path: String) -> bool:
 
 static func entity_disabled(ent: Entity) -> bool:
 	if can_send_message():
-		_send(Msg.ENTITY_DISABLED, [ent.get_instance_id(), ent.get_path()])
+		var path = ent.get_path() if ent.is_inside_tree() else str(ent)
+		_send(Msg.ENTITY_DISABLED, [ent.get_instance_id(), path])
 	return true
 
 
 static func entity_enabled(ent: Entity) -> bool:
 	if can_send_message():
-		_send(Msg.ENTITY_ENABLED, [ent.get_instance_id(), ent.get_path()])
+		var path = ent.get_path() if ent.is_inside_tree() else str(ent)
+		_send(Msg.ENTITY_ENABLED, [ent.get_instance_id(), path])
 	return true
 
 

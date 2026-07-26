@@ -356,6 +356,10 @@ func _poll_expanded_entities() -> void:
 func clear_all_data():
 	ecs_data.clear()
 	_pending_components.clear()
+	# Pins are keyed by instance id, which is meaningless across sessions/worlds;
+	# id reuse could even silently pin the wrong item.
+	_pinned_entities.clear()
+	_pinned_systems.clear()
 	# Drop any active query filter/results from the previous session.
 	_query_active = false
 	_query_result_ids.clear()
@@ -1173,6 +1177,14 @@ func _refresh_entity_tree_filter():
 
 
 func world_init(world_id: int, world_path: NodePath):
+	# A different world id inside the same session means the game swapped worlds
+	# (scene reload). The old world never sends removals for what it owned, so
+	# clear everything before the new world's snapshot arrives. Same-id re-inits
+	# (snapshot replays on re-subscribe) must NOT clear; entity_added and
+	# system_added merge in place for those.
+	var prev_world_id = ecs_data.get("world", {}).get("id", null)
+	if prev_world_id != null and prev_world_id != world_id:
+		clear_all_data()
 	# Initialize world tracking
 	var world_dict := get_or_create_dict(ecs_data, "world")
 	world_dict["id"] = world_id
@@ -1236,16 +1248,54 @@ func _is_flag_component(component_data: Dictionary) -> bool:
 	return false
 
 
+## Find the top-level entity row whose entity_id meta matches, or null.
+func _find_entity_item(ent: int) -> TreeItem:
+	if not entities_tree or entities_tree.get_root() == null:
+		return null
+	var child = entities_tree.get_root().get_first_child()
+	while child:
+		if child.get_meta("entity_id", null) == ent:
+			return child
+		child = child.get_next()
+	return null
+
+
+## Find the top-level system row whose system_id meta matches, or null.
+func _find_system_item(system_id: int) -> TreeItem:
+	if not system_tree or system_tree.get_root() == null:
+		return null
+	var child = system_tree.get_root().get_first_child()
+	while child:
+		if child.get_meta("system_id", null) == system_id:
+			return child
+		child = child.get_next()
+	return null
+
+
+## Build an entity row's column-0 label from state (pin + icon + name + disabled).
+## Deriving from state instead of patching the current text keeps repeated events
+## (snapshot replays, double disables) from stacking icons or suffixes.
+func _entity_display_name(ent: int, path, is_active: bool) -> String:
+	var display_name = ICON_ENTITY + " " + str(path).get_file()
+	if _pinned_entities.get(ent, false):
+		display_name = ICON_PIN + " " + display_name
+	if not is_active:
+		display_name += " (disabled)"
+	return display_name
+
+
 func entity_added(ent: int, path: NodePath) -> void:
 	var entities := get_or_create_dict(ecs_data, "entities")
 	# Merge with any existing (temporary) entry that may already have buffered components/relationships
 	var existing := entities.get(ent, {})
 	var existing_components: Dictionary = existing.get("components", {})
 	var existing_relationships: Dictionary = existing.get("relationships", {})
+	# Snapshot replays re-announce live entities; keep the known disabled state.
+	var is_active: bool = existing.get("active", true)
 	# Update in place instead of overwrite to avoid losing buffered component data
 	entities[ent] = {
 		"path": path,
-		"active": true,
+		"active": is_active,
 		"components": existing_components,
 		"relationships": existing_relationships,
 	}
@@ -1254,20 +1304,22 @@ func entity_added(ent: int, path: NodePath) -> void:
 		var root = entities_tree.get_root()
 		if root == null:
 			root = entities_tree.create_item()
-		var item = entities_tree.create_item(root)
-		# Column 0: Entity name with icon (and pin icon if pinned)
-		var display_name = ICON_ENTITY + " " + str(path).get_file()
-		if _pinned_entities.get(ent, false):
-			display_name = ICON_PIN + " " + display_name
-		item.set_text(0, display_name)
+		# Snapshot replays re-send entity_added for rows we already have. Update
+		# in place (keeping counts, expansion, and filter visibility) instead of
+		# appending a duplicate row.
+		var item := _find_entity_item(ent)
+		if item == null:
+			item = entities_tree.create_item(root)
+			# Columns 1-3: Counts (will be updated as components/relationships are added)
+			item.set_text(1, "0")
+			item.set_text(2, "0")
+			item.set_text(3, "0")
+			item.collapsed = true  # Start collapsed
+		# Column 0: Entity name with icon (and pin icon / disabled suffix from state)
+		item.set_text(0, _entity_display_name(ent, path, is_active))
 		item.set_tooltip_text(0, str(ent) + " : " + str(path))
-		# Columns 1-3: Counts (will be updated as components/relationships are added)
-		item.set_text(1, "0")
-		item.set_text(2, "0")
-		item.set_text(3, "0")
 		item.set_meta("entity_id", ent)
 		item.set_meta("path", path)
-		item.collapsed = true  # Start collapsed
 		# Flush any pending components that arrived before the entity node was created
 		if _pending_components.has(ent):
 			for comp_info in _pending_components[ent]:
@@ -1288,15 +1340,15 @@ func entity_added(ent: int, path: NodePath) -> void:
 func entity_removed(ent: int, path: NodePath) -> void:
 	var entities := get_or_create_dict(ecs_data, "entities")
 	entities.erase(ent)
-	# Remove from tree
+	# Remove from tree. Free every matching row so duplicates that leaked in
+	# before dedup existed can't linger as permanent ghosts.
 	if entities_tree and entities_tree.get_root():
-		var root = entities_tree.get_root()
-		var child = root.get_first_child()
+		var child = entities_tree.get_root().get_first_child()
 		while child:
+			var next_child = child.get_next()
 			if child.get_meta("entity_id", null) == ent:
 				child.free()
-				break
-			child = child.get_next()
+			child = next_child
 
 	# Clean up pinned state
 	_pinned_entities.erase(ent)
@@ -1308,29 +1360,18 @@ func entity_disabled(ent: int, path: NodePath) -> void:
 	var entities = get_or_create_dict(ecs_data, "entities")
 	if entities.has(ent):
 		entities[ent]["active"] = false
-	if entities_tree and entities_tree.get_root():
-		var child = entities_tree.get_root().get_first_child()
-		while child:
-			if child.get_meta("entity_id", null) == ent:
-				child.set_text(0, child.get_text(0) + " (disabled)")
-				break
-			child = child.get_next()
+	var item := _find_entity_item(ent)
+	if item:
+		item.set_text(0, _entity_display_name(ent, item.get_meta("path", path), false))
 
 
 func entity_enabled(ent: int, path: NodePath) -> void:
 	var entities = get_or_create_dict(ecs_data, "entities")
 	if entities.has(ent):
 		entities[ent]["active"] = true
-	if entities_tree and entities_tree.get_root():
-		var child = entities_tree.get_root().get_first_child()
-		while child:
-			if child.get_meta("entity_id", null) == ent:
-				# Remove any (disabled) suffix
-				var txt = child.get_text(0)
-				if txt.ends_with(" (disabled)"):
-					child.set_text(0, txt.substr(0, txt.length() - 11))
-				break
-			child = child.get_next()
+	var item := _find_entity_item(ent)
+	if item:
+		item.set_text(0, _entity_display_name(ent, item.get_meta("path", path), true))
 
 
 func system_added(
@@ -1342,12 +1383,22 @@ func system_added(
 	path: NodePath,
 ) -> void:
 	var systems_data := get_or_create_dict(ecs_data, "systems")
-	systems_data[sys] = default_system.duplicate()
-	systems_data[sys]["path"] = path
-	systems_data[sys]["group"] = group
-	systems_data[sys]["process_empty"] = process_empty
-	systems_data[sys]["active"] = active
-	systems_data[sys]["paused"] = paused
+	# Merge instead of overwrite: snapshot replays and set_system_active ACKs
+	# re-announce systems, and a fresh dict would wipe accumulated metrics.
+	var sys_entry := get_or_create_dict(systems_data, sys, default_system.duplicate(true))
+	sys_entry["path"] = path
+	sys_entry["group"] = group
+	sys_entry["process_empty"] = process_empty
+	sys_entry["active"] = active
+	sys_entry["paused"] = paused
+
+	# If the row already exists, reflect the (possibly changed) group and active
+	# state immediately instead of waiting for the next last_run_data frame.
+	var item := _find_system_item(sys)
+	if item:
+		item.set_text(1, group)
+		item.set_tooltip_text(1, group)
+		_update_system_active_display(item, active)
 
 	_update_systems_status_bar()
 
@@ -1355,6 +1406,16 @@ func system_added(
 func system_removed(sys: int, path: NodePath) -> void:
 	var systems_data := get_or_create_dict(ecs_data, "systems")
 	systems_data.erase(sys)
+
+	# Free the tree row(s) too, otherwise a world swap leaves the old world's
+	# systems listed next to the new world's rows.
+	if system_tree and system_tree.get_root():
+		var child = system_tree.get_root().get_first_child()
+		while child:
+			var next_child = child.get_next()
+			if child.get_meta("system_id", null) == sys:
+				child.free()
+			child = next_child
 
 	# Clean up pinned state
 	_pinned_systems.erase(sys)
@@ -1364,7 +1425,7 @@ func system_removed(sys: int, path: NodePath) -> void:
 
 func system_metric(system: int, system_name: String, time: float):
 	var systems_data := get_or_create_dict(ecs_data, "systems")
-	var sys_entry := get_or_create_dict(systems_data, system, default_system.duplicate())
+	var sys_entry := get_or_create_dict(systems_data, system, default_system.duplicate(true))
 	# Track the last run time separately so it's always visible even when aggregation occurs
 	sys_entry["last_time"] = time
 	var sys_metrics = ecs_data["systems"][system]["metrics"]
@@ -1389,7 +1450,7 @@ func system_metric(system: int, system_name: String, time: float):
 
 func system_last_run_data(system_id: int, system_name: String, last_run_data: Dictionary):
 	var systems_data := get_or_create_dict(ecs_data, "systems")
-	var sys_entry := get_or_create_dict(systems_data, system_id, default_system.duplicate())
+	var sys_entry := get_or_create_dict(systems_data, system_id, default_system.duplicate(true))
 	sys_entry["last_run_data"] = last_run_data
 	# Runtime ships pre-aggregated min_ms / max_ms / avg_ms / sample_count inside
 	# last_run_data — no local aggregation needed. This is robust to debugger
