@@ -114,6 +114,7 @@ func _process(delta: float) -> void:
 
 ## Example Games
 
+- **[Inventory & Item Actions](example_inventory/)** - In-repo example: relationship-based inventory, item templates, and a deferred action queue
 - **[GECS-101](https://github.com/csprance/gecs-101)** - A simple example
 - **[Zombies Ate My Neighbors](https://github.com/csprance/gecs/tree/zombies-ate-my-neighbors/game)** - Action arcade game
 - **[Breakout Clone](https://github.com/csprance/gecs/tree/breakout/game)** - Classic brick breaker
