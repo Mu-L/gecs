@@ -1,5 +1,42 @@
 # GECS Changelog
 
+## [9.1.1] - 2026-07-26 - Debugger duplication fixes
+
+### Fixed
+
+- **Entities and systems no longer appear duplicated in the debugger tab.** The
+  v9.1.0 subscription handshake replays a full state snapshot on every
+  `gecs:subscribe`, and subscribes fire several times per session (READY is
+  announced by both the ECS autoload and `World.initialize()`, the editor
+  subscribes again at session start, and once more on every category toggle or
+  Hz change). The tab appended a fresh entity row on each replay and never freed
+  system rows on removal, so replays and mid-session world swaps (scene reloads)
+  doubled the lists. The tab is now idempotent: entity rows are deduped by
+  instance id and updated in place (preserving expansion state, pin icons, and
+  the disabled suffix), `system_removed` frees its tree row, `entity_removed`
+  frees every matching row, and a `world_init` carrying a new world id clears
+  all state left over from the previous world. `system_added` re-announcements
+  (snapshot replays, `set_system_active` ACKs) now merge into the existing entry
+  instead of wiping accumulated min/max/avg metrics. Pinned-item state is
+  cleared with the rest of the data (it is keyed by instance id, which is
+  meaningless across sessions and worlds). New regression suite:
+  `tests/debug/test_editor_debugger_tab_dedup.gd`.
+- **`World.add_entity()` and `add_system()` are now idempotent.** Re-adding an
+  entity or system the world already tracks silently doubled it (a doubled
+  system genuinely ran twice per frame) and double-announced it to the
+  debugger. Both now log a debug line and return. New tests in
+  `tests/core/test_world.gd`.
+- **Debugger snapshots replay disabled state**, so a tab attaching after an
+  entity was disabled shows it correctly. The `entity_disabled`/`entity_enabled`
+  debugger messages also no longer log errors for entities outside the scene
+  tree.
+
+### Added
+
+- **`example_inventory/`**: a complete grid-inventory sample (components,
+  systems, item actions, and UI) ported from ZAMN, showing entity-per-item
+  inventory modeling on GECS.
+
 ## [9.1.0] - 2026-07-24 - Debugger instrumentation overhaul
 
 The v9 performance line made the simulation fast; this release gives the editor
