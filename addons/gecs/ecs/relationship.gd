@@ -78,7 +78,12 @@ extends Resource
 
 ## The relation component of the relationship.
 ## This defines the type of relationship and can contain additional data.
-var relation
+## The setter keeps [member _relation_script] in sync so code that assigns `relation`
+## after construction (deserialization, network replication) still matches correctly.
+var relation:
+	set(value):
+		relation = value
+		_relation_script = value.get_script() if value != null else null
 
 ## The target of the relationship.
 ## This can be an [Entity], a [Component], an archetype, or null.
@@ -96,8 +101,9 @@ var target_query: Dictionary = {}
 ## Flag to track if this relationship was created from a component query dictionary (private - used for validation)
 var _is_query_relationship: bool = false
 
-## Cached relation Script — set once at _init so matches() compares cached refs
-## instead of calling get_script() up to 3x per candidate on hot scan paths.
+## Cached relation Script, maintained by the [member relation] setter so matches()
+## compares cached refs instead of calling get_script() up to 3x per candidate on
+## hot scan paths.
 var _relation_script: Script = null
 
 

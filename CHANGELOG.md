@@ -1,5 +1,58 @@
 # GECS Changelog
 
+## [9.2.0] - 2026-07-28 - Relationship deserialization fix + dependency tracking
+
+### Fixed
+
+- **Deserialized relationships were restored but unmatchable.**
+  `GecsRelationshipData.to_relationship()` built an empty `Relationship.new()` and
+  assigned `relation` afterwards. `Relationship` caches the relation's `Script` in
+  `_init` (a hot-path optimization used by `matches()`), so a post-hoc assignment
+  left that cache null and every comparison of a restored relationship against a
+  probe failed. The relationship was still present in `entity.relationships`, which
+  made the failure look like a matching bug rather than a serialization one. Every
+  pattern-matched path broke for restored relationships: `get_relationship()`
+  returned null, `has_relationship()` returned false, `remove_relationship()` removed
+  nothing, and both `with_relationship()` / `without_relationship()` query filters
+  (which post-filter through `has_relationship`) silently returned no matches.
+
+  This bit any project that serializes a world and restores it, most visibly on a
+  level swap that purges and reinstates persistent entities: ownership and inventory
+  relationships came back inert, so the first `get_relationship(...).target` after
+  the swap hit a null base. `to_relationship()` now resolves the target first and
+  builds through `Relationship.new(relation, target)`, and `Relationship.relation`
+  gained a setter that keeps `_relation_script` in sync so any future post-hoc
+  assignment (deserialization, network replication) stays correct.
+
+  The existing serialization suite only asserted that `relationship.target` was
+  restored, never that the result was matchable, which is how this shipped. New
+  coverage in `tests/core/test_relationship_serialization.gd` asserts matchability
+  after a round trip for Entity, Component and Script targets, relation payload data
+  through property-query relationships, `remove_relationship()`, and relationships
+  surviving repeated purge/restore cycles.
+
+### Added
+
+- **`GECSTracker`: run a computation and learn its ECS data dependencies.**
+  `GECSTracker.track(callable)` evaluates a callable with lightweight
+  instrumentation on `QueryBuilder.execute()` and
+  `Entity.get_component()` / `has_component()`, returning
+  `{result, queries, reads}`: every query builder executed and every component
+  type read, however deep in helper code the access happened. Intended for reactive
+  derivations (subscribe an `Observer` to exactly the reported dependencies), cache
+  invalidation, and tooling that audits what a function actually touches. While
+  inactive (the default) the instrumentation costs a single static bool branch on
+  those hot paths. Tracking is not re-entrant: `track()` calls must not nest.
+  New suite: `tests/core/test_tracker.gd`.
+- **`Entity.set_read_tracker()` and `QueryBuilder.set_execute_tracker()`**, the
+  static hooks backing `GECSTracker`. Pass a valid `Callable` to install, or
+  `Callable()` to clear.
+- **`QueryBuilder.sensitivity()`**, a public view of the component script paths
+  whose mutation could affect a query's membership, for building stable dependency
+  signatures.
+- **`QueryBuilder.has_relationship_filters()`**, to tell whether a query filters on
+  relationships and therefore needs relationship events in a derived subscription.
+
 ## [9.1.1] - 2026-07-26 - Debugger duplication fixes
 
 ### Fixed

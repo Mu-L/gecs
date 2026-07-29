@@ -455,9 +455,40 @@ func execute_one() -> Entity:
 	return null
 
 
+## Dependency-tracking gate for [method execute] (see [GECSTracker]). False
+## except while a tracked evaluation runs. Set via [method set_execute_tracker].
+static var _execute_tracking := false
+## Callable invoked with the [QueryBuilder] on every tracked execute.
+static var _execute_tracker: Callable = Callable()
+
+
+## Install (or clear, by passing an invalid Callable) the static query-execution
+## tracker used for dependency tracking (see [GECSTracker], the intended consumer).
+static func set_execute_tracker(tracker: Callable) -> void:
+	_execute_tracker = tracker
+	_execute_tracking = tracker.is_valid()
+
+
+## Public view of this query's component sensitivity: the script paths whose
+## mutation could affect its membership (all/any/exclude components plus
+## relationship relation types). Useful with [GECSTracker] to build a stable
+## dependency signature for a tracked computation.
+func sensitivity() -> Array[String]:
+	return _component_sensitivity()
+
+
+## Whether this query filters on relationships (with_relationship /
+## without_relationship). Useful with [GECSTracker] to decide if a reactive
+## subscription derived from this query needs relationship events.
+func has_relationship_filters() -> bool:
+	return not _relationships.is_empty() or not _exclude_relationships.is_empty()
+
+
 ## Executes the constructed query and retrieves matching entities.[br]
 ## [param returns] -  An [Array] of [Entity] that match the query criteria.
 func execute() -> Array:
+	if _execute_tracking:
+		_execute_tracker.call(self)
 	# For relationship or group filters we need fresh filtering every call (no stale cached filtered result)
 	# Only post-filter relationships and groups prevent caching
 	var has_post_filter_rels := (

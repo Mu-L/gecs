@@ -82,22 +82,25 @@ static func from_relationship(relationship: Relationship) -> GecsRelationshipDat
 
 
 ## Recreates a Relationship from this data (requires entity mapping for Entity targets)
+##
+## Resolves the target first and builds the [Relationship] through its constructor.
+## This MUST NOT assign `relation` onto an empty [code]Relationship.new()[/code]:
+## [member Relationship._relation_script] is cached in [method Relationship._init],
+## so a post-hoc assignment leaves it null and every later
+## [method Relationship.matches] call compares null against a real script and fails.
+## That silently breaks get/has/remove_relationship and every
+## [method QueryBuilder.with_relationship] filter for deserialized relationships.
 func to_relationship(entity_mapping: Dictionary = {}) -> Relationship:
-	var relationship = Relationship.new()
-
-	# Restore relation component
-	if relation_data:
-		relationship.relation = relation_data.duplicate(true)
-
 	# Restore target based on type
+	var target = null
 	match target_type:
 		"null":
-			relationship.target = null
+			target = null
 		"Entity":
 			# entity_mapping is keyed by the ORIGINAL saved id — int handles from
 			# v9+ saves and legacy String UUIDs coexist during a single load.
 			if target_entity_id in entity_mapping:
-				relationship.target = entity_mapping[target_entity_id]
+				target = entity_mapping[target_entity_id]
 			else:
 				push_warning(
 					(
@@ -108,14 +111,17 @@ func to_relationship(entity_mapping: Dictionary = {}) -> Relationship:
 				return null
 		"Component":
 			if target_component_data:
-				relationship.target = target_component_data.duplicate(true)
+				target = target_component_data.duplicate(true)
 		"Script":
 			if target_script_path != "":
-				relationship.target = load(target_script_path)
+				target = load(target_script_path)
 		_:
 			push_warning(
 				"GecsRelationshipData: Unknown target type during deserialization: " + target_type
 			)
 			return null
 
-	return relationship
+	# Restore relation component
+	var relation: Component = relation_data.duplicate(true) if relation_data else null
+
+	return Relationship.new(relation, target)

@@ -74,6 +74,13 @@ signal relationships_batch_removed(entity: Entity, _relationships: Array)
 var components: Dictionary = {}
 
 ## Relationships attached to the entity
+## Dependency-tracking gate for [method get_component] / [method has_component]
+## (see [GECSTracker]). False except while a tracked evaluation runs; the bool
+## keeps the hot path to a single static branch. Set both via [method set_read_tracker].
+static var _read_tracking := false
+## Callable invoked with the component (Script or instance) on every tracked read.
+static var _read_tracker: Callable = Callable()
+
 var relationships: Array[Relationship] = []
 
 ## Relationship bucket index: relation script instance_id -> Array[Relationship].
@@ -387,6 +394,8 @@ func remove_all_components() -> void:
 ## [b]Example:[/b]
 ##     [codeblock]var transform = entity.get_component(Transform)[/codeblock]
 func get_component(component: Resource) -> Component:
+	if _read_tracking:
+		_read_tracker.call(component)
 	# Inlined key derivation — this is the hottest call in non-iterate() systems,
 	# and the _comp_key call itself costs ~0.6us of dispatch overhead.
 	return components.get(
@@ -399,10 +408,22 @@ func get_component(component: Resource) -> Component:
 ## This is useful when you're checking to see if it has a component and not going to use the component itself.[br]
 ## If you plan on getting and using the component, use [method get_component] instead.
 func has_component(component: Resource) -> bool:
+	if _read_tracking:
+		_read_tracker.call(component)
 	# Inlined key derivation — see get_component
 	return components.has(
 		component.get_instance_id() if component is Script else component.get_script().get_instance_id()
 	)
+
+
+## Install (or clear, by passing an invalid Callable) the static component-read
+## tracker used for dependency tracking (see [GECSTracker], the intended
+## consumer). Pass a valid [param tracker] to receive every
+## [method get_component] / [method has_component] argument while active; pass
+## [code]Callable()[/code] to disable.
+static func set_read_tracker(tracker: Callable) -> void:
+	_read_tracker = tracker
+	_read_tracking = tracker.is_valid()
 
 
 ## CHANGE DETECTION: mark a component as written for queries using .changed().
